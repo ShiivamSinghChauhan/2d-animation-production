@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Rig marking</title>
+<style>
+  body { margin: 0; font: 14px system-ui, sans-serif; background: #1d1b19; color: #eee; display: flex; height: 100vh; }
+  #side { width: 330px; padding: 14px; overflow: auto; background: #262320; }
+  #side h2 { margin: 0 0 6px; font-size: 17px; }
+  #side ol { padding-left: 22px; margin: 8px 0; }
+  #side li { padding: 3px 4px; border-radius: 4px; cursor: pointer; color: #aaa; }
+  #side li.done { color: #9fd49f; }
+  #side li.now { background: #4a3d22; color: #ffd27a; font-weight: 600; }
+  #side li small { display: block; color: #999; font-weight: 400; }
+  #wrap { flex: 1; position: relative; overflow: hidden; }
+  canvas { position: absolute; left: 0; top: 0; cursor: crosshair; }
+  #lens { position: absolute; width: 180px; height: 180px; border: 2px solid #ffd27a; border-radius: 50%; pointer-events: none; display: none; }
+  button { margin: 4px 4px 0 0; padding: 7px 12px; border: 0; border-radius: 5px; background: #3b5d3b; color: #fff; cursor: pointer; }
+  button.grey { background: #444; }
+  #msg { margin-top: 8px; color: #ffd27a; min-height: 18px; }
+  select { width: 100%; padding: 5px; margin: 6px 0; }
+</style></head>
+<body>
+<div id="side">
+  <h2>Rig marking</h2>
+  <div>Click each point on the picture, in this order. Drag a dot to fix it. A lens shows the spot under the cursor. <b>Near</b> = the arm/leg drawn on top (nearer to us).</div>
+  <select id="pick"></select>
+  <ol id="list"></ol>
+  <button id="save">Save</button><button class="grey" id="undo">Undo last</button>
+  <div id="msg"></div>
+</div>
+<div id="wrap"><canvas id="c"></canvas><canvas id="lens"></canvas></div>
+<script>
+// The standard side-view skeleton: every character is marked with the same points, so every action fits every character.
+const POINTS = [
+  ['ground', 'Ground between the feet', 'on the floor line, midway between the heels'],
+  ['head_top', 'Top of the head', 'top of the skull (not the bun, crown or turban tip)'],
+  ['neck_top', 'Top of the neck', 'just under the jaw, below the ear'],
+  ['neck_base', 'Base of the neck', 'between the shoulders'],
+  ['pelvis', 'Hips', 'centre of the hips, where the legs start'],
+  ['n_shoulder', 'Near shoulder', 'centre of the shoulder joint'],
+  ['n_elbow', 'Near elbow', ''],
+  ['n_wrist', 'Near wrist', ''],
+  ['n_finger', 'Near fingertips', 'tip of the middle finger'],
+  ['f_shoulder', 'Far shoulder', 'best guess if hidden'],
+  ['f_elbow', 'Far elbow', ''],
+  ['f_wrist', 'Far wrist', ''],
+  ['f_finger', 'Far fingertips', ''],
+  ['n_knee', 'Near knee', 'best guess under clothes'],
+  ['n_ankle', 'Near ankle', ''],
+  ['n_toe', 'Near toes', ''],
+  ['f_knee', 'Far knee', 'best guess under clothes'],
+  ['f_ankle', 'Far ankle', ''],
+  ['f_toe', 'Far toes', ''],
+  ['eye', 'Eye', 'centre of the eye'],
+  ['mouth', 'Mouth', 'centre of the lips'],
+  ['brow', 'Eyebrow', 'middle of the eyebrow'],
+];
+const LINES = [['head_top','neck_top'],['neck_top','neck_base'],['neck_base','pelvis'],['n_shoulder','n_elbow'],['n_elbow','n_wrist'],['n_wrist','n_finger'],
+  ['f_shoulder','f_elbow'],['f_elbow','f_wrist'],['f_wrist','f_finger'],['pelvis','n_knee'],['n_knee','n_ankle'],['n_ankle','n_toe'],['pelvis','f_knee'],['f_knee','f_ankle'],['f_ankle','f_toe']];
+const cv = document.getElementById('c'), g = cv.getContext('2d'), lens = document.getElementById('lens'), lg = lens.getContext('2d');
+lens.width = lens.height = 180;
+let img = new Image(), id = null, pts = {}, cur = 0, scale = 1, drag = null;
+const H = { 'X-Room': '1', 'Content-Type': 'application/json' };
+
+async function init() {
+  const ids = await (await fetch('/api/rig/list')).json();
+  const sel = document.getElementById('pick');
+  sel.innerHTML = ids.map(x => `<option>${x}</option>`).join('');
+  const want = new URLSearchParams(location.search).get('id');
+  if (want) sel.value = want;
+  sel.onchange = () => load(sel.value);
+  if (sel.value) load(sel.value);
+}
+async function load(x) {
+  id = x;
+  const r = await (await fetch('/api/rig?id=' + encodeURIComponent(x))).json();
+  pts = r.points || {};
+  cur = POINTS.findIndex(p => !pts[p[0]]); if (cur < 0) cur = POINTS.length;
+  img = new Image(); img.onload = () => { fit(); draw(); list(); }; img.src = '/file/' + r.image;
+}
+function fit() {
+  const w = document.getElementById('wrap');
+  scale = Math.min(w.clientWidth / img.width, w.clientHeight / img.height);
+  cv.width = img.width * scale; cv.height = img.height * scale;
+}
+function list() {
+  document.getElementById('list').innerHTML = POINTS.map((p, i) =>
+    `<li class="${i === cur ? 'now' : pts[p[0]] ? 'done' : ''}" onclick="cur=${i};list();draw()">${p[1]}${p[2] ? `<small>${p[2]}</small>` : ''}</li>`).join('');
+  document.getElementById('msg').textContent = cur < POINTS.length ? 'Next: ' + POINTS[cur][1] : 'All points marked. Save.';
+}
+function draw() {
+  g.clearRect(0, 0, cv.width, cv.height);
+  g.fillStyle = '#7a7a7a'; g.fillRect(0, 0, cv.width, cv.height);
+  g.drawImage(img, 0, 0, cv.width, cv.height);
+  g.lineWidth = 3; g.strokeStyle = 'rgba(255,210,122,.85)';
+  for (const [a, b] of LINES) if (pts[a] && pts[b]) { g.beginPath(); g.moveTo(pts[a][0] * scale, pts[a][1] * scale); g.lineTo(pts[b][0] * scale, pts[b][1] * scale); g.stroke(); }
+  POINTS.forEach(([k], i) => {
+    if (!pts[k]) return;
+    g.fillStyle = k.startsWith('f_') ? '#6aa0ff' : k.startsWith('n_') ? '#ff7a5a' : '#ffd27a';
+    g.beginPath(); g.arc(pts[k][0] * scale, pts[k][1] * scale, i === cur ? 7 : 5, 0, 7); g.fill();
+  });
+}
+const at = e => { const r = cv.getBoundingClientRect(); return [(e.clientX - r.left) / scale, (e.clientY - r.top) / scale]; };
+cv.onmousedown = e => {
+  const p = at(e);
+  drag = Object.keys(pts).find(k => Math.hypot(pts[k][0] - p[0], pts[k][1] - p[1]) < 10 / scale);
+  if (!drag && cur < POINTS.length) { pts[POINTS[cur][0]] = p.map(Math.round); cur = POINTS.findIndex(q => !pts[q[0]]); if (cur < 0) cur = POINTS.length; list(); draw(); }
+};
+cv.onmousemove = e => {
+  const p = at(e);
+  if (drag) { pts[drag] = p.map(Math.round); draw(); }
+  const r = cv.getBoundingClientRect();
+  lens.style.display = 'block'; lens.style.left = (e.clientX - r.left + 30) + 'px'; lens.style.top = (e.clientY - r.top - 90) + 'px';
+  lg.fillStyle = '#7a7a7a'; lg.fillRect(0, 0, 180, 180);
+  lg.drawImage(img, p[0] - 45, p[1] - 45, 90, 90, 0, 0, 180, 180);
+  lg.strokeStyle = '#ffd27a'; lg.beginPath(); lg.moveTo(90, 80); lg.lineTo(90, 100); lg.moveTo(80, 90); lg.lineTo(100, 90); lg.stroke();
+};
+cv.onmouseup = () => { drag = null; };
+cv.onmouseleave = () => { lens.style.display = 'none'; drag = null; };
+document.getElementById('undo').onclick = () => { const done = POINTS.filter(p => pts[p[0]]); if (done.length) { delete pts[done[done.length - 1][0]]; cur = POINTS.findIndex(q => !pts[q[0]]); list(); draw(); } };
+document.getElementById('save').onclick = async () => {
+  const r = await fetch('/api/rig', { method: 'POST', headers: H, body: JSON.stringify({ id, points: pts }) });
+  document.getElementById('msg').textContent = r.ok ? `Saved ${Object.keys(pts).length}/${POINTS.length} points for ${id}.` : 'Save failed';
+};
+window.onresize = () => { fit(); draw(); };
+init();
+</script>
+</body></html>

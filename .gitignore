@@ -1,0 +1,10 @@
+# signed-in browser profiles (cookies): never commit
+.browser/
+.env
+node_modules/
+jobs/
+out/
+assets/
+episodes/
+__pycache__/
+bible/

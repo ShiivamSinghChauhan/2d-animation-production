@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Production editor</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #1e1b19; color: #e6e1da; font: 13px system-ui, "Nirmala UI", sans-serif; height: 100vh; display: grid;
+         grid-template-rows: 38px minmax(200px, 1fr) 6px var(--tl, 330px); grid-template-columns: 1fr 360px; overflow: hidden; }
+  #top { grid-column: 1 / 3; display: flex; align-items: center; gap: 8px; padding: 0 10px; background: #2a2623; border-bottom: 1px solid #3a3531; }
+  #top b { color: #ffd27a; }
+  button, select, input, textarea { font: inherit; color: #eee; background: #3a3531; border: 1px solid #4a4440; border-radius: 4px; }
+  button { padding: 4px 10px; cursor: pointer; } button:hover { background: #4a4440; } button.on { background: #b8862b; border-color: #d9a441; color: #111; }
+  button.go { background: #3d6b3d; border-color: #4d8b4d; } button:disabled { opacity: .45; cursor: default; }
+  input[type=text], input[type=number] { padding: 3px 5px; width: 70px; } textarea { width: 100%; padding: 5px; resize: vertical; }
+  #stage { display: flex; flex-direction: column; min-height: 0; background: #111; }
+  #pv { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
+  #pv canvas { max-width: 100%; max-height: 100%; background: #000; }
+  #transport { display: flex; align-items: center; gap: 8px; padding: 5px 10px; background: #26221f; }
+  #tc { font: 15px ui-monospace, monospace; color: #ffd27a; min-width: 150px; }
+  #side { grid-row: 2 / 5; grid-column: 2; overflow-y: auto; background: #26221f; border-left: 1px solid #3a3531; padding: 8px; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 8px; } .tabs button { flex: 1; }
+  .box { background: #2f2a27; border: 1px solid #3d3733; border-radius: 6px; padding: 8px; margin-bottom: 8px; }
+  .box h3 { margin: 0 0 6px; font-size: 13px; color: #ffd27a; }
+  label { display: block; color: #aaa; font-size: 12px; margin: 6px 0 2px; }
+  .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 4px 0; }
+  .dim { color: #999; font-size: 12px; }
+  .take { display: flex; gap: 6px; align-items: center; padding: 3px; border-radius: 4px; }
+  .take.cur { background: #3d4a2d; }
+  .take img { width: 64px; height: 36px; object-fit: cover; border-radius: 3px; }
+  .lib { padding: 6px; border-radius: 5px; background: #332e2a; margin-bottom: 6px; cursor: grab; }
+  .note { border-left: 3px solid #ffd27a; padding: 3px 6px; margin: 4px 0; font-size: 12px; } .note.done { border-color: #6fbf6f; }
+  #split { grid-column: 1; background: #3a3531; cursor: row-resize; }
+  #tlwrap { grid-column: 1; position: relative; background: #1a1816; min-height: 0; }
+  #tl { position: absolute; left: 0; top: 0; }
+  #msg { color: #ffd27a; margin-left: auto; max-width: 45%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #drophint { position: absolute; inset: 0; border: 3px dashed #ffd27a; display: none; pointer-events: none; }
+  kbd { background: #3a3531; border-radius: 3px; padding: 0 4px; font-size: 11px; }
+</style></head>
+<body>
+<div id="top"><b>Production editor</b> <select id="ep"></select>
+  <button id="undo" title="Ctrl+Z">Undo</button><span id="saved" class="dim"></span>
+  <button id="render" class="go">Render video</button><span id="rstate" class="dim"></span>
+  <span id="msg"></span></div>
+<div id="stage"><div id="pv"><canvas id="cv" width="1920" height="1080"></canvas></div>
+  <div id="transport"><button id="play">▶ Play</button><span id="tc">0:00.00</span>
+    <button id="tstart" title="Home">⏮</button><button id="tend" title="End">⏭</button>
+    <span class="dim"><kbd>Space</kbd> play · <kbd>S</kbd> split · <kbd>Del</kbd> delete · <kbd>M</kbd> mute clip · <kbd>←</kbd><kbd>→</kbd> nudge · <kbd>Ctrl</kbd>+wheel zoom · drop sound files on a row</span></div></div>
+<div id="side"></div>
+<div id="split"></div>
+<div id="tlwrap"><canvas id="tl"></canvas><div id="drophint"></div></div>
+<script src="/engine.js"></script>
+<script>
+const Q = new URLSearchParams(location.search), RENDER = Q.get('render') === '1';
+const $ = id => document.getElementById(id);
+const post = (u, b) => fetch(u, { method: 'POST', headers: { 'X-Room': '1', 'Content-Type': 'application/json' }, body: JSON.stringify(b) });
+const say = t => { $('msg').textContent = t; $('msg').title = t; };
+const fmt = t => { t = Math.max(0, t); const m = Math.floor(t / 60), s = t - m * 60; return `${m}:${s.toFixed(2).padStart(5, '0')}`; };
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const KCOL = { shot: '#5a6f8f', actor: '#7a5f8f', voice: '#4f8a6a', music: '#a07a3a', sfx: '#8f5a4a' };
+const KNAME = { shot: 'Shots', actor: 'On screen', voice: 'Voice', music: 'Music', sfx: 'Effects' };
+let ST = null, E = null, ep = Q.get('ep') || '', T = 0, playing = null, sel = null, hist = [], dirty = false, saveTimer = null, tab = 'clip';
+const cv = $('cv'), g = cv.getContext('2d');
+
+// ---------------- render mode: used by render_edit.js, no editor around it
+if (RENDER) {
+  document.body.style.display = 'block';
+  for (const id of ['top', 'transport', 'side', 'split', 'tlwrap']) $(id).style.display = 'none';
+  (async () => {
+    const st = await (await fetch('/api/edit?ep=' + ep)).json();
+    await Engine.load(st);
+    const c = cv, gg = g;
+    let pcm = null;
+    window.RENDER_API = {
+      fps: st.edit.fps || 24, dur: Engine.duration(),
+      frame: t => { Engine.frame(gg, t); return c.toDataURL('image/jpeg', 0.92).split(',')[1]; },
+      async audio() {             // the mix as 16-bit stereo PCM, kept here and read out in pieces
+        const b = await Engine.renderAudio(), L = b.getChannelData(0), R = b.getChannelData(1);
+        pcm = new Int16Array(L.length * 2);
+        for (let i = 0; i < L.length; i++) { pcm[2 * i] = Math.max(-1, Math.min(1, L[i])) * 32767; pcm[2 * i + 1] = Math.max(-1, Math.min(1, R[i])) * 32767; }
+        return pcm.length * 2;
+      },
+      chunk(off, len) { const u = new Uint8Array(pcm.buffer, off, Math.min(len, pcm.byteLength - off)); let s = ''; for (let i = 0; i < u.length; i += 32768) s += String.fromCharCode.apply(null, u.subarray(i, i + 32768)); return btoa(s); },
+    };
+    window.RENDER_READY = true;
+  })();
+}
+
+// ---------------- loading and saving
+async function init() {
+  const list = await (await fetch('/api/edit/list')).json();
+  if (!ep) ep = list[0] || '';
+  $('ep').innerHTML = list.map(e => `<option ${e === ep ? 'selected' : ''}>${e}</option>`).join('');
+  $('ep').onchange = e => { location.search = '?ep=' + e.target.value; };
+  if (!ep) { say('No episode has an edit yet. Ask Claude for the first cut.'); return; }
+  say('Loading pictures and sounds…');
+  ST = await (await fetch('/api/edit?ep=' + ep)).json();
+  E = ST.edit;
+  await Engine.load(ST);
+  document.title = ep + ' · Production editor';
+  fitTL(); view.s = Math.max(4, (tlc.width - HEAD) / Engine.duration()); side(); drawTL(); showFrame();
+  say(`${ep}: ${fmt(Engine.duration())}, ${E.clips.length} clips. Click a clip to see its prompt and tries.`);
+  setInterval(poll, 3000);
+}
+function changed() {
+  dirty = true; $('saved').textContent = 'saving…';
+  Engine.setEdit(E); drawTL(); if (!playing) showFrame();
+  clearTimeout(saveTimer); saveTimer = setTimeout(save, 700);
+}
+async function save() {
+  const r = await post('/api/edit', { ep, edit: E });
+  dirty = !r.ok; $('saved').textContent = r.ok ? 'saved' : 'NOT saved';
+}
+function snap() { hist.push(JSON.stringify(E)); if (hist.length > 200) hist.shift(); }
+function undo() { const h = hist.pop(); if (!h) return; const id = sel && sel.id; E = JSON.parse(h); sel = id ? E.clips.find(c => c.id === id) || null : null; changed(); side(); }
+async function poll() {
+  const r = await (await fetch('/api/edit?ep=' + ep)).json().catch(() => null);
+  if (!r) return;
+  const nb = JSON.stringify(r.notes) !== JSON.stringify(ST.notes), rb = JSON.stringify(r.render) !== JSON.stringify(ST.render);
+  ST.notes = r.notes; ST.render = r.render; ST.library = r.library; ST.media = r.media;
+  renderState();
+  if (nb && !['TEXTAREA', 'INPUT'].includes(document.activeElement.tagName)) side();
+}
+function renderState() {
+  const r = ST.render;
+  $('rstate').innerHTML = !r ? '' : r.state === 'working' ? `rendering ${r.done || 0} / ${r.total || '?'} frames…`
+    : r.state === 'done' ? `done: <a style="color:#9fd49f" href="/file/${esc(r.file)}" target="_blank">${esc(r.file.split('/').pop())}</a> (${esc(r.time || '')})`
+    : `failed: ${esc(r.error || '')}`;
+  $('render').disabled = r && r.state === 'working';
+}
+
+// ---------------- preview
+function showFrame() { Engine.frame(g, T); $('tc').textContent = fmt(T) + ' / ' + fmt(Engine.duration()); }
+function play(only) {
+  if (playing) { stop(); return; }
+  const ac = Engine.audioCtx(); ac.resume();
+  const from = only ? only.start : T, at = ac.currentTime + 0.08;
+  const m = Engine.mix(ac, from, at, only);
+  playing = { m, from, at, until: only ? only.start + only.dur : Engine.duration() };
+  $('play').textContent = '⏸ Pause';
+  const tick = () => {
+    if (!playing) return;
+    T = playing.from + Math.max(0, ac.currentTime - playing.at);
+    if (T >= playing.until) { stop(); return; }
+    showFrame(); followPlayhead(); drawTL(); requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+function stop() { if (playing) playing.m.stop(); playing = null; $('play').textContent = '▶ Play'; showFrame(); drawTL(); }
+function seek(t) { const was = !!playing; if (was) stop(); T = Math.max(0, Math.min(Engine.duration(), t)); showFrame(); drawTL(); if (was) play(); }
+$('play').onclick = () => play();
+$('tstart').onclick = () => seek(0);
+$('tend').onclick = () => seek(Engine.duration());
+$('undo').onclick = undo;
+
+// ---------------- timeline (a canvas: rows of clips, waveforms, the playhead)
+const tlc = $('tl'), tg = tlc.getContext('2d'), HEAD = 150, RULER = 24, ROW = 30;
+let view = { s: 10, x: 0, y: 0 }, tdrag = null, hover = null;
+const xOf = t => HEAD + (t - view.x) * view.s, tOf = x => (x - HEAD) / view.s + view.x;
+function rows() { return E.tracks; }
+function rowY(i) { return RULER + i * ROW - view.y; }
+function fitTL() { const w = $('tlwrap'); tlc.width = w.clientWidth; tlc.height = w.clientHeight; }
+function followPlayhead() { const x = xOf(T); if (x > tlc.width - 40) view.x = T - (tlc.width - HEAD) * 0.15 / view.s; }
+function clipLabel(c, k) {
+  if (k === 'voice') return c.text || c.line || '';
+  if (k === 'shot') return c.title ? '“' + c.title + '”' : (c.bg || (c.bgs || []).join(' + '));
+  if (k === 'actor') return (c.who || '') + (c.x1 != null && c.x1 !== c.x ? ' → walks' : '') + (c.shadow ? ' (shadow)' : '');
+  return c.name || (c.file || '').split('/').pop();
+}
+function drawTL() {
+  if (!E) return;
+  const W = tlc.width, H = tlc.height;
+  tg.fillStyle = '#1a1816'; tg.fillRect(0, 0, W, H);
+  const R = rows();
+  R.forEach((tr, i) => {
+    const y = rowY(i); if (y + ROW < RULER || y > H) return;
+    tg.fillStyle = i % 2 ? '#1d1b19' : '#211e1b'; tg.fillRect(HEAD, y, W - HEAD, ROW);
+    for (const c of E.clips.filter(c => c.track === tr.id)) {
+      const x0 = xOf(c.start), x1 = xOf(c.start + c.dur); if (x1 < HEAD || x0 > W) continue;
+      const on = c === sel, col = KCOL[tr.kind];
+      tg.globalAlpha = tr.mute || c.mute ? 0.35 : 1;
+      tg.fillStyle = col; tg.fillRect(x0, y + 2, Math.max(2, x1 - x0), ROW - 4);
+      const wv = c.file && Engine.WAVE[c.file];
+      if (wv && x1 - x0 > 6) {         // the sound's shape, so the user can trim by eye
+        tg.fillStyle = 'rgba(0,0,0,.35)'; const mid = y + ROW / 2, amp = (ROW - 8) / 2, g0 = (c.gain ?? 1) * (tr.kind === 'voice' ? 1 : 1.6);
+        for (let x = Math.max(HEAD, Math.floor(x0)); x < Math.min(W, x1); x++) {
+          const i2 = Math.floor((tOf(x) - c.start + (c.in || 0)) * 100); const v = Math.min(1, (wv[i2] || 0) * g0) * amp;
+          tg.fillRect(x, mid - v, 1, v * 2 || 1);
+        }
+      }
+      if (tr.kind === 'shot' && !c.title && x1 - x0 > 50) {
+        const im = Engine.IMG[(E.images || {})[c.bg || (c.bgs || [])[0]]];
+        if (im && im.width) { tg.save(); tg.beginPath(); tg.rect(x0 + 2, y + 3, Math.min(48, x1 - x0 - 4), ROW - 6); tg.clip(); tg.drawImage(im, x0 + 2, y + 3, 48, 27); tg.restore(); }
+      }
+      if (c.fade_in > 0 || c.fade_out > 0) {
+        tg.strokeStyle = 'rgba(255,255,255,.5)'; tg.lineWidth = 1; tg.beginPath();
+        tg.moveTo(x0, y + ROW - 3); tg.lineTo(x0 + (c.fade_in || 0) * view.s, y + 4); tg.lineTo(x1 - (c.fade_out || 0) * view.s, y + 4); tg.lineTo(x1, y + ROW - 3); tg.stroke();
+      }
+      tg.strokeStyle = on ? '#ffd27a' : 'rgba(0,0,0,.6)'; tg.lineWidth = on ? 2 : 1; tg.strokeRect(x0 + .5, y + 2.5, x1 - x0 - 1, ROW - 5);
+      if (x1 - x0 > 30) {
+        tg.save(); tg.beginPath(); tg.rect(x0, y, x1 - x0 - 3, ROW); tg.clip();
+        tg.fillStyle = '#fff'; tg.font = '12px system-ui, "Nirmala UI"';
+        tg.fillText(clipLabel(c, tr.kind), x0 + (tr.kind === 'shot' && !c.title ? 54 : 5), y + 19); tg.restore();
+      }
+      if (c.mute) { tg.globalAlpha = 1; tg.fillStyle = 'rgba(0,0,0,.6)'; tg.fillRect(x0 + 2, y + 3, 20, ROW - 6); tg.fillStyle = '#fff'; tg.font = '13px system-ui'; tg.fillText('🔇', x0 + 4, y + 20); }
+      const ns = (ST.notes || []).filter(n => n.clip === c.id && n.status !== 'done').length;
+      if (ns) { tg.fillStyle = '#ffd27a'; tg.beginPath(); tg.arc(x1 - 7, y + 8, 4, 0, 7); tg.fill(); }
+      tg.globalAlpha = 1;
+    }
+  });
+  // ruler
+  tg.fillStyle = '#2a2623'; tg.fillRect(HEAD, 0, W - HEAD, RULER);
+  const step = [0.5, 1, 2, 5, 10, 15, 30, 60, 120].find(s => s * view.s > 70) || 300;
+  tg.fillStyle = '#aaa'; tg.font = '11px system-ui'; tg.strokeStyle = '#555';
+  for (let t = Math.floor(view.x / step) * step; t < tOf(W); t += step) {
+    const x = xOf(t); if (x < HEAD) continue;
+    tg.beginPath(); tg.moveTo(x, 14); tg.lineTo(x, RULER); tg.stroke(); tg.fillText(fmt(t).replace(/\.00$/, ''), x + 3, 12);
+  }
+  // track heads
+  tg.fillStyle = '#26221f'; tg.fillRect(0, RULER, HEAD, H);
+  R.forEach((tr, i) => {
+    const y = rowY(i); if (y + ROW < RULER || y > H) return;
+    tg.fillStyle = KCOL[tr.kind]; tg.fillRect(0, y + 2, 4, ROW - 4);
+    tg.fillStyle = tr.mute ? '#777' : '#ddd'; tg.font = '12px system-ui'; tg.fillText(tr.name.slice(0, 17), 10, y + 19);
+    tg.fillStyle = tr.mute ? '#c55' : '#4a4440'; tg.fillRect(HEAD - 26, y + 6, 22, 18);
+    tg.fillStyle = '#fff'; tg.font = '12px system-ui';
+    tg.fillText(tr.kind === 'shot' || tr.kind === 'actor' ? (tr.mute ? '🚫' : '👁') : (tr.mute ? '🔇' : '🔊'), HEAD - 23, y + 20);
+  });
+  tg.fillStyle = '#2a2623'; tg.fillRect(0, 0, HEAD, RULER); tg.fillStyle = '#888'; tg.font = '11px system-ui'; tg.fillText('🔊 mute a whole row', 8, 16);
+  // playhead
+  const px = xOf(T); if (px >= HEAD) { tg.strokeStyle = '#ff5a4a'; tg.lineWidth = 1.5; tg.beginPath(); tg.moveTo(px, 0); tg.lineTo(px, H); tg.stroke(); }
+}
+function hitTL(x, y) {
+  if (y < RULER) return { ruler: true };
+  const i = Math.floor((y - RULER + view.y) / ROW), tr = rows()[i];
+  if (!tr) return { none: true };
+  if (x < HEAD) return { head: tr, mute: x > HEAD - 28 };
+  const t = tOf(x), edge = 6 / view.s;
+  const cs = E.clips.filter(c => c.track === tr.id && t >= c.start - edge && t <= c.start + c.dur + edge);
+  const c = cs.find(c => t >= c.start && t <= c.start + c.dur) || cs[0];
+  if (!c) return { track: tr, t };
+  const side = (t - c.start) * view.s < 6 && c.dur * view.s > 14 ? 'l' : (c.start + c.dur - t) * view.s < 6 && c.dur * view.s > 14 ? 'r' : null;
+  return { clip: c, track: tr, t, side };
+}
+function snapT(t, self) {          // stick to the playhead and to other clips' edges
+  const lim = 8 / view.s; let best = t, bd = lim;
+  const pts = [T, 0]; for (const c of E.clips) if (c !== self) pts.push(c.start, c.start + c.dur);
+  for (const p of pts) if (Math.abs(p - t) < bd) { bd = Math.abs(p - t); best = p; }
+  return best;
+}
+tlc.onmousedown = e => {
+  const r = tlc.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top, h = hitTL(x, y);
+  if (e.button === 1 || e.button === 2) { tdrag = { pan: 1, sx: x, sy: y, vx: view.x, vy: view.y }; e.preventDefault(); return; }
+  if (h.ruler || h.none || (h.track && !h.clip)) { if (h.track && !h.clip) { sel = null; side(); } tdrag = { scrub: 1 }; seek(tOf(x)); return; }
+  if (h.head) { if (h.mute) { snap(); h.head.mute = !h.head.mute; changed(); } return; }
+  const c = h.clip; sel = c; side();
+  snap();
+  const len = c.file && Engine.BUF[c.file] ? Engine.BUF[c.file].duration : null;
+  tdrag = { c, side: h.side, t0: tOf(x), start: c.start, dur: c.dur, in: c.in || 0, len, track: c.track, moved: false };
+  drawTL();
+};
+window.addEventListener('mousemove', e => {
+  if (!tdrag) {
+    if (e.target !== tlc) return;
+    const r = tlc.getBoundingClientRect(), h = hitTL(e.clientX - r.left, e.clientY - r.top);
+    tlc.style.cursor = h.side ? 'ew-resize' : h.clip ? 'grab' : h.head ? 'pointer' : 'text';
+    return;
+  }
+  const r = tlc.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+  if (tdrag.pan) { view.x = Math.max(0, tdrag.vx - (x - tdrag.sx) / view.s); view.y = Math.max(0, tdrag.vy - (y - tdrag.sy)); drawTL(); return; }
+  if (tdrag.scrub) { seek(tOf(x)); return; }
+  const d = tOf(x) - tdrag.t0, c = tdrag.c, k = (E.tracks.find(t => t.id === c.track) || {}).kind;
+  tdrag.moved = true;
+  if (tdrag.side === 'l') {
+    let s = snapT(tdrag.start + d, c); s = Math.min(s, tdrag.start + tdrag.dur - 0.1);
+    if (tdrag.len != null) s = Math.max(s, tdrag.start - tdrag.in);
+    c.start = Math.max(0, s); c.dur = tdrag.start + tdrag.dur - c.start; if (tdrag.len != null) c.in = tdrag.in + (c.start - tdrag.start);
+  } else if (tdrag.side === 'r') {
+    let en = snapT(tdrag.start + tdrag.dur + d, c); en = Math.max(en, c.start + 0.1);
+    if (tdrag.len != null) en = Math.min(en, c.start + tdrag.len - (c.in || 0));
+    c.dur = en - c.start;
+  } else {
+    let s = Math.max(0, tdrag.start + d); const s2 = snapT(s, c), e2 = snapT(s + c.dur, c);
+    s = Math.abs(s2 - s) <= Math.abs(e2 - (s + c.dur)) ? s2 : e2 - c.dur; c.start = Math.max(0, s);
+    const i = Math.floor((y - RULER + view.y) / ROW), tr = rows()[i];    // to another row of the same kind
+    if (tr && tr.kind === k && tr.id !== c.track && (k !== 'voice')) c.track = tr.id;
+  }
+  c.start = Math.round(c.start * 1000) / 1000; c.dur = Math.round(c.dur * 1000) / 1000; if (c.in != null) c.in = Math.round(c.in * 1000) / 1000;
+  Engine.setEdit(E); drawTL(); if (!playing) showFrame();
+});
+window.addEventListener('mouseup', () => {
+  if (tdrag && tdrag.c) { if (tdrag.moved) { changed(); side(); } else hist.pop(); }
+  tdrag = null;
+});
+tlc.oncontextmenu = e => e.preventDefault();
+tlc.onwheel = e => {
+  e.preventDefault();
+  const r = tlc.getBoundingClientRect(), x = e.clientX - r.left;
+  if (e.ctrlKey) { const t = tOf(x); view.s = Math.max(0.5, Math.min(400, view.s * Math.exp(-e.deltaY * 0.0015))); view.x = Math.max(0, t - (x - HEAD) / view.s); }
+  else if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) view.x = Math.max(0, view.x + (e.deltaX || e.deltaY) / view.s);
+  else view.y = Math.max(0, Math.min(Math.max(0, rows().length * ROW + RULER - tlc.height + 10), view.y + e.deltaY));
+  drawTL();
+};
+// resize the timeline
+$('split').onmousedown = e => {
+  const y0 = e.clientY, h0 = $('tlwrap').clientHeight;
+  const mv = ev => { document.body.style.setProperty('--tl', Math.max(120, Math.min(innerHeight - 200, h0 - (ev.clientY - y0))) + 'px'); fitTL(); drawTL(); };
+  const up = () => { removeEventListener('mousemove', mv); removeEventListener('mouseup', up); };
+  addEventListener('mousemove', mv); addEventListener('mouseup', up);
+};
+addEventListener('resize', () => { fitTL(); drawTL(); });
+
+// ---------------- adding sounds: files from the computer, or takes from the library, dropped on a row
+function rowAt(clientY) { const r = tlc.getBoundingClientRect(); return rows()[Math.floor((clientY - r.top - RULER + view.y) / ROW)]; }
+function trackFor(kind, prefer) {
+  if (prefer && prefer.kind === kind) return prefer;
+  let tr = E.tracks.find(t => t.kind === kind && !E.clips.some(c => c.track === t.id && Math.abs(c.start - T) < 0.01));
+  if (!tr) { const n = E.tracks.filter(t => t.kind === kind).length + 1; tr = { id: kind + '_' + Date.now(), kind, name: KNAME[kind] + ' ' + n }; E.tracks.push(tr); }
+  return tr;
+}
+async function addSound(file, kind, at, row, extra = {}) {
+  await Engine.loadSound(file);
+  const b = Engine.BUF[file]; if (!b) { say('Could not read ' + file); return; }
+  const tr = trackFor(kind, row);
+  const c = { id: 'c' + Date.now().toString(36), track: tr.id, start: Math.round(at * 1000) / 1000, dur: Math.round(b.duration * 1000) / 1000,
+    file, in: 0, gain: kind === 'music' ? 0.45 : 0.6, fade_in: kind === 'music' ? 1.5 : 0, fade_out: kind === 'music' ? 2.5 : 0.3,
+    name: file.split('/').pop().replace(/\.\w+$/, ''), takes: [{ file, label: 'added' }], ...extra };
+  E.clips.push(c); sel = c; changed(); side();
+  say(`Added ${c.name} on ${tr.name} at ${fmt(at)}. Drag its ends to trim, drag it to move.`);
+}
+const wrap = $('tlwrap');
+wrap.ondragover = e => { e.preventDefault(); $('drophint').style.display = 'block'; };
+wrap.ondragleave = () => { $('drophint').style.display = 'none'; };
+wrap.ondrop = async e => {
+  e.preventDefault(); $('drophint').style.display = 'none';
+  const r = tlc.getBoundingClientRect(), at = Math.max(0, tOf(e.clientX - r.left)), row = rowAt(e.clientY);
+  const lib = e.dataTransfer.getData('text/x-take');
+  snap();
+  if (lib) { const L = JSON.parse(lib); await addSound(L.file, row && ['music', 'sfx'].includes(row.kind) ? row.kind : L.kind, at, row, { name: L.name, prompt: L.prompt, length: L.length, takes: L.takes }); return; }
+  for (const f of e.dataTransfer.files) {
+    say('Adding ' + f.name + '…');
+    const res = await fetch(`/api/edit/upload?ep=${encodeURIComponent(ep)}&name=${encodeURIComponent(f.name)}`, { method: 'POST', headers: { 'X-Room': '1' }, body: f });
+    const j = await res.json().catch(() => ({}));
+    if (!j.ok) { say('Could not add ' + f.name); continue; }
+    if (/\.(png|jpe?g)$/i.test(f.name)) {
+      const name = j.file.split('/').pop().replace(/\.\w+$/, ''); E.images = E.images || {}; E.images[name] = j.file; await Engine.loadImage(j.file);
+      const c = { id: 'c' + Date.now().toString(36), track: 'shots', start: at, dur: 5, bg: name, cam: [1, .5, .5, 1.06, .5, .5] };
+      E.clips.push(c); sel = c; changed(); side(); continue;
+    }
+    const kind = row && ['music', 'sfx'].includes(row.kind) ? row.kind : (f.size > 3e6 ? 'music' : 'sfx');
+    await addSound(j.file, kind, at, row);
+  }
+};
+
+// ---------------- keys
+addEventListener('keydown', e => {
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName) || RENDER) return;
+  const k = e.key.toLowerCase();
+  if (k === ' ') { e.preventDefault(); play(); return; }
+  if (e.ctrlKey && k === 'z') { e.preventDefault(); undo(); return; }
+  if (e.ctrlKey && k === 's') { e.preventDefault(); save(); return; }
+  if (k === 'home') { seek(0); return; }
+  if (k === 'end') { seek(Engine.duration()); return; }
+  const fr = 1 / (E.fps || 24), big = e.shiftKey ? 1 : fr;
+  if (sel && (k === 'arrowleft' || k === 'arrowright')) { e.preventDefault(); snap(); sel.start = Math.max(0, Math.round((sel.start + (k === 'arrowleft' ? -big : big)) * 1000) / 1000); changed(); side(); return; }
+  if (!sel && (k === 'arrowleft' || k === 'arrowright')) { seek(T + (k === 'arrowleft' ? -big : big)); return; }
+  if (sel && k === 'm' && ['voice', 'music', 'sfx'].includes(trackOfClip(sel).kind)) { toggleMute(sel); return; }
+  if (sel && (k === 'delete' || k === 'backspace')) { snap(); E.clips = E.clips.filter(c => c !== sel); sel = null; changed(); side(); return; }
+  if (sel && k === 's' && !e.ctrlKey && T > sel.start + 0.05 && T < sel.start + sel.dur - 0.05) {     // split at the playhead
+    snap(); const a = T - sel.start, b = JSON.parse(JSON.stringify(sel));
+    b.id = 'c' + Date.now().toString(36); b.start = Math.round(T * 1000) / 1000; b.dur = Math.round((sel.dur - a) * 1000) / 1000;
+    if (sel.in != null) b.in = Math.round((sel.in + a) * 1000) / 1000;
+    sel.dur = Math.round(a * 1000) / 1000; if (sel.fade_out) { b.fade_out = sel.fade_out; sel.fade_out = 0; } b.fade_in = 0;
+    E.clips.push(b); changed(); side(); say('Split at ' + fmt(T) + '.');
+  }
+});
+
+// ---------------- the side panel: the chosen clip (prompt, tries, settings, notes), the sound library, notes
+function side() {
+  if (RENDER || !E) return;
+  const tabs = `<div class="tabs"><button data-tab="clip" class="${tab === 'clip' ? 'on' : ''}">Clip</button>
+    <button data-tab="lib" class="${tab === 'lib' ? 'on' : ''}">Music &amp; effects</button>
+    <button data-tab="notes" class="${tab === 'notes' ? 'on' : ''}">Notes${(ST.notes || []).filter(n => n.status !== 'done').length ? ' (' + (ST.notes || []).filter(n => n.status !== 'done').length + ')' : ''}</button></div>`;
+  let h = '';
+  if (tab === 'clip') h = sel ? clipPanel(sel) : `<div class="box dim">Click a clip on the timeline to see what it is, its prompt and its tries, and to change it.<br><br>
+    The <b>Music &amp; effects</b> tab lists every sound Claude asked for, with the prompt and length for Flow; drag a take onto the timeline.
+    Files from your computer (e.g. what you trimmed from Flow) can be dropped straight onto a row.</div>${noteBox(null)}`;
+  if (tab === 'lib') h = libPanel();
+  if (tab === 'notes') h = notesPanel();
+  $('side').innerHTML = tabs + h;
+  document.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { tab = b.dataset.tab; side(); });
+  wire();
+}
+function trackOfClip(c) { return E.tracks.find(t => t.id === c.track) || {}; }
+function num(id, label, v, step = 0.01) { return `<span>${label} <input type="number" id="${id}" value="${v ?? ''}" step="${step}"></span>`; }
+function clipPanel(c) {
+  const tr = trackOfClip(c), k = tr.kind;
+  let h = `<div class="box"><h3>${KNAME[k]}: ${esc(clipLabel(c, k)).slice(0, 80)}</h3>
+    <div class="dim">${esc(tr.name)} · ${fmt(c.start)} → ${fmt(c.start + c.dur)} (${c.dur.toFixed(2)} s)</div>
+    <div class="row">${num('f_start', 'Start', c.start)}${num('f_dur', 'Length', c.dur)}</div>`;
+  if (['voice', 'music', 'sfx'].includes(k)) {
+    const len = Engine.BUF[c.file] ? Engine.BUF[c.file].duration : 0;
+    h += `<div class="row">${num('f_in', 'Cut from file start', c.in || 0)}<span class="dim">file is ${len.toFixed(1)} s</span></div>
+      <div class="row">${num('f_gain', 'Volume', c.gain ?? 1, 0.05)}${num('f_fi', 'Fade in', c.fade_in || 0, 0.1)}${num('f_fo', 'Fade out', c.fade_out || 0, 0.1)}</div>
+      <div class="row"><button id="solo">▶ Listen to this clip alone</button>
+        <button id="mute" class="${c.mute ? 'on' : ''}">${c.mute ? '🔇 Muted (click to unmute)' : '🔊 Mute this clip'} <kbd>M</kbd></button></div>`;
+  }
+  if (k === 'actor') h += `<div class="row">${num('f_x', 'x', c.x)}${num('f_x1', 'walks to x', c.x1)}</div>
+      <div class="row">${num('f_y', 'feet y', c.y ?? 0.97)}${num('f_h', 'height', c.h ?? 0.65)}</div>
+      <div class="row"><label style="margin:0"><input type="checkbox" id="f_flip" ${c.flip ? 'checked' : ''}> faces left</label>
+      <label style="margin:0"><input type="checkbox" id="f_shadow" ${c.shadow ? 'checked' : ''}> shadow only</label></div>
+      <div class="dim">x and y are fractions of the frame (0 = left / top, 1 = right / bottom); height is a fraction of the frame height.</div>`;
+  if (k === 'shot') {
+    if (c.title != null) h += `<label>Title text</label><input type="text" id="f_title" style="width:100%" value="${esc(c.title)}">`;
+    else h += `<label>Background</label><select id="f_bg">${Object.keys(E.images || {}).map(n => `<option ${n === c.bg ? 'selected' : ''}>${n}</option>`).join('')}</select>
+      <label>Camera: start zoom, centre x, y → end zoom, x, y</label><div class="row">${(c.cam || [1, .5, .5, 1.06, .5, .5]).map((v, i) => `<input type="number" step="0.01" data-cam="${i}" value="${v}" style="width:52px">`).join('')}</div>
+      <div class="row"><button id="camstart">Start = frame as now</button><button id="camend">End = frame as now</button></div>`;
+  }
+  h += '</div>';
+  // prompt and tries
+  if (c.prompt != null || (c.takes || []).length) {
+    const flow = k === 'music' || k === 'sfx';
+    h += `<div class="box"><h3>${k === 'voice' ? 'Line and delivery' : 'Prompt'}${c.length ? ' · ' + esc(c.length) : ''}</h3>
+      ${k === 'voice' ? `<div class="dim">voice: ${esc(c.voice || '')}</div>` : ''}
+      <textarea id="f_prompt" rows="${k === 'voice' ? 3 : 6}">${esc(c.prompt || '')}</textarea>
+      <div class="row">${flow ? '<button id="copyp">Copy prompt (for Flow)</button>' : ''}
+        <button id="redo">${flow ? 'Ask Claude to change the prompt' : 'Ask Claude to redo it with this'}</button></div>
+      ${flow ? '<div class="dim">Make it in Flow, trim it, then drop the file on this clip with “Replace with my file”.</div>' : ''}</div>`;
+    h += `<div class="box"><h3>Tries</h3>${(c.takes || []).map((tk, i) => {
+      const cur = tk.file === (k === 'shot' ? null : c.file), img = /\.(png|jpe?g)$/i.test(tk.file);
+      return `<div class="take ${cur ? 'cur' : ''}">${img ? `<img src="/thumb/${esc(tk.file)}">` : `<button data-hear="${i}">▶</button>`}
+        <span>${esc(tk.label)}${cur ? ' · in use' : ''}</span>${!img && !cur ? `<button data-use="${i}">Use this</button>` : ''}</div>`; }).join('') || '<div class="dim">none</div>'}
+      ${['voice', 'music', 'sfx'].includes(k) ? '<div class="row"><button id="replace">Replace with my file…</button><input type="file" id="rfile" accept="audio/*" style="display:none"></div>' : ''}</div>`;
+  }
+  h += noteBox(c);
+  return h;
+}
+function noteBox(c) {
+  const ns = (ST.notes || []).filter(n => c ? n.clip === c.id : !n.clip);
+  return `<div class="box"><h3>${c ? 'Note to Claude about this clip' : 'Note to Claude (at ' + fmt(T) + ')'}</h3>
+    <textarea id="f_note" rows="2" placeholder="Hindi or English, e.g. 'yahan music thoda pehle shuru ho' / 'is line ki awaaz zyada gussa ho'"></textarea>
+    <div class="row"><button class="go" id="sendnote">Send to Claude</button></div>
+    ${ns.slice().reverse().map(n => `<div class="note ${n.status === 'done' ? 'done' : ''}">${n.status === 'done' ? '✓' : '●'} “${esc(n.text)}”
+      ${n.reply ? `<br><span style="color:#ccc">Claude: ${esc(n.reply)}</span>` : n.status !== 'done' ? '<br><span class="dim">waiting for Claude</span>' : ''}</div>`).join('')}</div>`;
+}
+function libPanel() {
+  const L = ST.library || [];
+  return `<div class="dim" style="margin-bottom:6px">What Claude asked for while writing the episode. Copy a prompt into Flow; tries made by the desk can be dragged onto the timeline.
+    Your own files: drop them on a timeline row.</div>` + L.map((s, i) => `<div class="box"><h3>${esc(s.name)} <span class="dim">(${s.kind}${s.length ? ', ' + esc(s.length) : ''})</span></h3>
+      <div class="dim" style="max-height:70px;overflow:auto">${esc(s.prompt)}</div>
+      <div class="row"><button data-copy="${i}">Copy prompt</button></div>
+      ${s.takes.map((tk, j) => `<div class="lib" draggable="true" data-lib="${i}:${j}">⠿ <button data-hearlib="${i}:${j}">▶</button> ${esc(tk.label)} <span class="dim">drag onto the timeline</span></div>`).join('') || '<div class="dim">not made yet</div>'}</div>`).join('')
+    + ((ST.media || []).length ? `<div class="box"><h3>Your files</h3>${ST.media.map(m => `<div class="lib" draggable="true" data-media="${esc(m)}">⠿ ${esc(m.split('/').pop())}</div>`).join('')}</div>` : '');
+}
+function notesPanel() {
+  const ns = (ST.notes || []).slice().reverse();
+  return ns.map(n => { const c = E.clips.find(x => x.id === n.clip);
+    return `<div class="note ${n.status === 'done' ? 'done' : ''}" ${c ? `data-goto="${c.id}" style="cursor:pointer"` : ''}>${n.status === 'done' ? '✓' : '●'} ${esc(n.what || 'whole episode')} at ${fmt(n.t || 0)}: “${esc(n.text)}”
+      ${n.reply ? `<br><span style="color:#ccc">Claude: ${esc(n.reply)}</span>` : ''}</div>`; }).join('') || '<div class="dim">No notes yet.</div>';
+}
+let hearing = null;
+function hear(file) {
+  if (hearing) { hearing.pause(); hearing = null; return; }
+  hearing = new Audio(Engine.url(file)); hearing.play(); hearing.onended = () => hearing = null;
+}
+function wire() {
+  const on = (id, ev, fn) => { const el = $(id); if (el) el[ev] = fn; };
+  const c = sel;
+  const setNum = (id, key, min) => on(id, 'onchange', e => { const v = parseFloat(e.target.value); snap(); if (isNaN(v)) delete c[key]; else c[key] = min != null ? Math.max(min, v) : v; changed(); side(); });
+  if (c) {
+    setNum('f_start', 'start', 0); setNum('f_dur', 'dur', 0.1); setNum('f_in', 'in', 0); setNum('f_gain', 'gain', 0);
+    setNum('f_fi', 'fade_in', 0); setNum('f_fo', 'fade_out', 0); setNum('f_x', 'x'); setNum('f_x1', 'x1'); setNum('f_y', 'y'); setNum('f_h', 'h', 0.05);
+    on('f_flip', 'onchange', e => { snap(); c.flip = e.target.checked; changed(); });
+    on('f_shadow', 'onchange', e => { snap(); c.shadow = e.target.checked; changed(); });
+    on('f_title', 'onchange', e => { snap(); c.title = e.target.value; changed(); });
+    on('f_bg', 'onchange', e => { snap(); c.bg = e.target.value; delete c.bgs; changed(); });
+    document.querySelectorAll('[data-cam]').forEach(el => el.onchange = () => { snap(); c.cam = c.cam || [1, .5, .5, 1.06, .5, .5]; c.cam[+el.dataset.cam] = parseFloat(el.value); changed(); });
+    const frameNow = () => { const k = Math.max(0, Math.min(1, (T - c.start) / c.dur)), cam = c.cam || [1, .5, .5, 1.06, .5, .5], e = k < .5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
+      return [0, 1, 2].map(i => Math.round((cam[i] + (cam[i + 3] - cam[i]) * e) * 1000) / 1000); };
+    on('camstart', 'onclick', () => { snap(); const f = frameNow(); c.cam = [...f, ...(c.cam || [1, .5, .5, 1.06, .5, .5]).slice(3)]; changed(); side(); });
+    on('camend', 'onclick', () => { snap(); const f = frameNow(); c.cam = [...(c.cam || [1, .5, .5]).slice(0, 3), ...f]; changed(); side(); });
+    on('solo', 'onclick', () => play(c));
+    on('mute', 'onclick', () => toggleMute(c));
+    on('f_prompt', 'onchange', e => { snap(); c.prompt = e.target.value; changed(); });
+    on('copyp', 'onclick', () => { navigator.clipboard.writeText($('f_prompt').value); say('Prompt copied. Paste it in Flow.'); });
+    on('redo', 'onclick', () => sendNote(c, `Redo this ${trackOfClip(c).kind} clip with this prompt:\n${$('f_prompt').value}`));
+    document.querySelectorAll('[data-hear]').forEach(b => b.onclick = () => hear(c.takes[+b.dataset.hear].file));
+    document.querySelectorAll('[data-use]').forEach(b => b.onclick = async () => {
+      const f = c.takes[+b.dataset.use].file; await Engine.loadSound(f); snap(); c.file = f;
+      const len = Engine.BUF[f] ? Engine.BUF[f].duration : c.dur; c.in = Math.min(c.in || 0, Math.max(0, len - 0.1)); c.dur = Math.min(c.dur, len - c.in) || c.dur; changed(); side(); });
+    on('replace', 'onclick', () => $('rfile').click());
+    on('rfile', 'onchange', async e => {
+      const f = e.target.files[0]; if (!f) return; say('Adding ' + f.name + '…');
+      const j = await (await fetch(`/api/edit/upload?ep=${encodeURIComponent(ep)}&name=${encodeURIComponent(f.name)}`, { method: 'POST', headers: { 'X-Room': '1' }, body: f })).json();
+      await Engine.loadSound(j.file); snap(); c.takes = [...(c.takes || []), { file: j.file, label: 'my file: ' + f.name }];
+      c.file = j.file; c.in = 0; c.dur = Math.round(Engine.BUF[j.file].duration * 1000) / 1000; changed(); side(); say(f.name + ' is in use now; the old one stays under Tries.');
+    });
+  }
+  on('sendnote', 'onclick', () => sendNote(c, $('f_note').value));
+  document.querySelectorAll('[data-copy]').forEach(b => b.onclick = () => { navigator.clipboard.writeText(ST.library[+b.dataset.copy].prompt); say('Prompt copied. Paste it in Flow.'); });
+  document.querySelectorAll('[data-hearlib]').forEach(b => b.onclick = e => { e.stopPropagation(); const [i, j] = b.dataset.hearlib.split(':').map(Number); hear(ST.library[i].takes[j].file); });
+  document.querySelectorAll('[data-lib]').forEach(el => el.ondragstart = e => {
+    const [i, j] = el.dataset.lib.split(':').map(Number), s = ST.library[i];
+    e.dataTransfer.setData('text/x-take', JSON.stringify({ file: s.takes[j].file, kind: s.kind, name: s.name, prompt: s.prompt, length: s.length, takes: s.takes })); });
+  document.querySelectorAll('[data-media]').forEach(el => el.ondragstart = e => {
+    const f = el.dataset.media; e.dataTransfer.setData('text/x-take', JSON.stringify({ file: f, kind: 'sfx', name: f.split('/').pop().replace(/\.\w+$/, ''), takes: [{ file: f, label: 'my file' }] })); });
+  document.querySelectorAll('[data-goto]').forEach(el => el.onclick = () => { sel = E.clips.find(x => x.id === el.dataset.goto); tab = 'clip'; seek(sel.start); side(); });
+}
+function toggleMute(c) {
+  snap(); c.mute = !c.mute; if (!c.mute) delete c.mute;
+  changed(); side(); say(c.mute ? `${clipLabel(c, trackOfClip(c).kind).slice(0, 40)}: muted. It stays on the timeline; M or the button unmutes it.` : 'Unmuted.');
+}
+async function sendNote(c, text) {
+  if (!text || !text.trim()) { say('Write the note first.'); return; }
+  const r = await (await post('/api/edit/note', { ep, clip: c ? c.id : null, what: c ? `${KNAME[trackOfClip(c).kind]}: ${clipLabel(c, trackOfClip(c).kind)}`.slice(0, 90) : '', t: c ? c.start : T, text })).json();
+  if (r.ok) { ST.notes.push({ n: r.n, clip: c ? c.id : null, text, status: 'new', t: T }); say('Sent to Claude. The answer shows here under the note.'); side(); drawTL(); }
+}
+$('render').onclick = async () => {
+  if (dirty) await save();
+  const r = await (await post('/api/edit/render', { ep })).json().catch(() => ({}));
+  say(r.ok ? 'Rendering in the background with the same engine as the preview. You can keep working (changes after now are not in this render).' : (r.error || 'Could not start.'));
+  ST.render = { state: 'working', done: 0 }; renderState();
+};
+if (!RENDER) init();
+</script></body></html>

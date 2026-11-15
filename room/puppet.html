@@ -1,0 +1,789 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Character studio</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px system-ui, sans-serif; background: #1d1b19; color: #eee; display: flex; height: 100vh; user-select: none; }
+  #left { width: 270px; display: flex; flex-direction: column; background: #262320; border-right: 1px solid #3a3530; }
+  #right { width: 300px; background: #262320; border-left: 1px solid #3a3530; padding: 10px; overflow: auto; }
+  h3 { margin: 10px 10px 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: #a99; }
+  #tools { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 8px; }
+  button { padding: 7px 10px; border: 0; border-radius: 5px; background: #444; color: #fff; cursor: pointer; font: inherit; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.on { background: #b07a1e; }
+  button.go { background: #3b5d3b; }
+  #layers { flex: 1; overflow: auto; padding: 0 6px 6px; }
+  .lay { display: flex; align-items: center; gap: 6px; padding: 3px 4px; border-radius: 5px; cursor: grab; border: 1px solid transparent; }
+  .lay.sel { background: #4a3d22; border-color: #b07a1e; }
+  .lay.drop { border-top: 2px solid #ffd27a; }
+  .lay img { width: 34px; height: 34px; object-fit: contain; background: #555; border-radius: 3px; }
+  .lay .nm { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .lay .bn { color: #9fd49f; font-size: 11px; }
+  .lay .mk { color: #6fa0ff; font-size: 11px; }
+  .lay .eye { cursor: pointer; opacity: .8; width: 18px; text-align: center; }
+  #wrap { flex: 1; position: relative; overflow: hidden; background: #77736d; }
+  canvas { position: absolute; left: 0; top: 0; }
+  #viewbar { position: absolute; left: 8px; bottom: 8px; display: flex; gap: 4px; align-items: center; background: rgba(30,27,25,.85); padding: 4px; border-radius: 6px; }
+  #viewbar button { padding: 4px 9px; }
+  #vzoom { min-width: 48px; text-align: center; color: #ccc; }
+  .help { color: #bbb; line-height: 1.5; margin-bottom: 8px; }
+  .help b { color: #ffd27a; }
+  label { display: block; margin: 6px 0 2px; color: #bbb; }
+  select, input[type=text], textarea { width: 100%; padding: 5px; background: #333; color: #eee; border: 1px solid #555; border-radius: 4px; font: inherit; }
+  input[type=range] { width: 100%; }
+  #msg { color: #ffd27a; margin: 8px 0; min-height: 18px; }
+  .row { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; margin: 6px 0; }
+  .box { background: #2f2b27; border: 1px solid #3d3832; border-radius: 6px; padding: 8px; margin: 8px 0; }
+  .box > b { color: #ffd27a; }
+  .try { width: 58px; height: 58px; object-fit: contain; background: #555; border-radius: 4px; cursor: pointer; border: 2px solid transparent; }
+  .try.on { border-color: #ffd27a; }
+  .dim { color: #999; }
+  #swatch { width: 34px; height: 28px; padding: 0; border: 2px solid #fff; border-radius: 4px; background: none; }
+</style></head>
+<body>
+<div id="left">
+  <div id="tools"></div>
+  <h3>Parts (top = front) · drag to reorder</h3>
+  <div id="layers"></div>
+</div>
+<div id="wrap"><canvas id="c"></canvas>
+  <div id="viewbar"><button id="vhand" title="Hand: drag the screen (hold Space for the same)">✋ Hand</button>
+    <button id="vfit" title="Show the whole character (Home)">⤢ Fit all (Home)</button>
+    <button id="vsel" title="Zoom to the selected part (. key)">Zoom to part (.)</button>
+    <button id="vout">−</button><span id="vzoom">100%</span><button id="vin">+</button></div></div>
+<div id="right">
+  <div id="help" class="help"></div>
+  <div id="brushbox"></div>
+  <div id="props"></div>
+  <div class="row"><label style="margin:0">Guide picture</label><input type="range" id="ghost" min="0" max="100" value="0"></div>
+  <div class="row"><button class="go" id="save">Save (Ctrl+S)</button><button id="undo">Undo (Ctrl+Z)</button></div>
+  <div id="msg"></div>
+</div>
+<script>
+// Character studio: one character, one view. Parts {file, name, x, y (centre), rot, s, sx, sy, bone, swap, hide,
+// marks: [{w, pts: [[x, y]...]}] in the part's own pixels}. Array order = drawing order (first = back).
+// Bones {name, parent, x, y (joint), ex, ey (tip)} in the rest pose; pose {bone: degrees} only while testing.
+const TOOLS = [['move', '1 Move / size'], ['erase', '2 Soft eraser'], ['brush', '3 Colour brush'], ['mark', '4 Mark a fix'],
+  ['bones', '5 Bones'], ['pose', '6 Test bending']];
+// n_ = near side (towards the camera), f_ = far side: the side-view version of Blender's .L / .R
+const STD = ['hips', 'chest', 'neck', 'head', 'n_shoulder', 'n_upper', 'n_fore', 'n_hand', 'f_shoulder', 'f_upper', 'f_fore', 'f_hand',
+  'n_thigh', 'n_shin', 'n_foot', 'f_thigh', 'f_shin', 'f_foot'];
+const STD_PARENT = { chest: 'hips', neck: 'chest', head: 'neck', n_shoulder: 'chest', n_upper: 'n_shoulder', n_fore: 'n_upper', n_hand: 'n_fore',
+  f_shoulder: 'chest', f_upper: 'f_shoulder', f_fore: 'f_upper', f_hand: 'f_fore', n_thigh: 'hips', n_shin: 'n_thigh', n_foot: 'n_shin', f_thigh: 'hips', f_shin: 'f_thigh', f_foot: 'f_shin' };
+// what to call a bone grown out of a bone's tip (E) or out of its joint (Shift+E): first name not used yet
+const GROW_TIP = { hips: ['chest'], chest: ['neck', 'n_shoulder', 'f_shoulder'], neck: ['head'], n_shoulder: ['n_upper'], n_upper: ['n_fore'], n_fore: ['n_hand'],
+  f_shoulder: ['f_upper'], f_upper: ['f_fore'], f_fore: ['f_hand'], n_thigh: ['n_shin'], n_shin: ['n_foot'], f_thigh: ['f_shin'], f_shin: ['f_foot'] };
+const GROW_JOINT = { hips: ['n_thigh', 'f_thigh'] };
+const STD_POS = { hips: [.5, .55, .5, .45], chest: [.5, .45, .5, .2], neck: [.52, .2, .55, .16], head: [.55, .16, .55, .02],
+  n_shoulder: [.5, .2, .45, .22], n_upper: [.45, .22, .44, .38], n_fore: [.44, .38, .45, .52], n_hand: [.45, .52, .46, .6],
+  f_shoulder: [.5, .2, .55, .22], f_upper: [.55, .22, .56, .38], f_fore: [.56, .38, .57, .52], f_hand: [.57, .52, .58, .6],
+  n_thigh: [.47, .55, .47, .75], n_shin: [.47, .75, .47, .94], n_foot: [.47, .94, .58, .98],
+  f_thigh: [.53, .55, .53, .75], f_shin: [.53, .75, .53, .94], f_foot: [.53, .94, .64, .98] };
+const SWAPS = ['', 'eye:open', 'eye:half', 'eye:closed', 'mouth:rest', 'mouth:aa', 'mouth:ee', 'mouth:oo', 'near_hand:open', 'near_hand:fist', 'near_hand:point', 'near_hand:palm'];
+const MARK = '#1e6bff';
+const pid = new URLSearchParams(location.search).get('id') || 'munni3';
+const cv = document.getElementById('c'), g = cv.getContext('2d');
+const $ = id => document.getElementById(id);
+const say = t => { $('msg').textContent = t; };
+const post = (url, body) => fetch(url, { method: 'POST', headers: { 'X-Room': '1', 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+let R = { version: 2, parts: [], bones: [] }, IM = {}, INFO = {}, DIR = '', ref = null;
+let tool = 'move', selP = null, selB = null, pose = {}, S = new Set();   // S: every selected part, selP: the last one clicked
+let view = { s: .5, x: 60, y: 20 }, drag = null, hist = [], unsaved = false, dirty = new Set(), cursor = null, space = false, picking = false;
+let brush = { size: 30, soft: .7, flow: .3, color: [200, 150, 60], inside: true };
+
+// ---------- history: layout snapshots and pixel snapshots of one part, undone in order
+function snap() { hist.push({ R: JSON.stringify(R) }); if (hist.length > 120) hist.shift(); unsaved = true; }
+function snapPix(p) {
+  const c = editable(p), k = document.createElement('canvas'); k.width = c.width; k.height = c.height;
+  k.getContext('2d').drawImage(c, 0, 0); hist.push({ file: p.file, pix: k }); if (hist.length > 120) hist.shift(); unsaved = true;
+}
+function undo() {
+  const h = hist.pop(); if (!h) return;
+  if (h.pix) {
+    const c = IM[h.file]; if (!(c instanceof HTMLCanvasElement)) return;
+    c.width = h.pix.width; c.height = h.pix.height; c.getContext('2d').drawImage(h.pix, 0, 0); dirty.add(h.file);
+  } else {
+    const f = selP && selP.file; R = JSON.parse(h.R); selP = f ? R.parts.find(q => q.file === f) || null : null; selB = null; S = new Set(selP ? [selP] : []);
+  }
+  layers(); props();
+}
+
+// ---------- loading
+async function loadImage(file, stamp) {
+  const im = new Image(); im.src = '/file/' + DIR + '/' + file + '?' + (stamp || Date.now());
+  await im.decode().catch(() => {}); IM[file] = im;
+}
+async function init() {
+  const r = await (await fetch('/api/puppet?id=' + pid)).json();
+  DIR = r.dir;
+  const L = r.layout || {};
+  if (L.version === 2) R = L;
+  else R = { version: 2, bones: [], reference: r.reference, parts: r.parts.map(p => ({ file: p.file, name: p.name || p.file.replace('.png', ''),
+    x: (p.box[0] + p.box[2]) / 2, y: (p.box[1] + p.box[3]) / 2, rot: 0, s: 1, bone: '', swap: '', hide: false })) };
+  for (const p of r.parts) { INFO[p.file] = p; await loadImage(p.file, p.mtime); }
+  await applyUpdates(r.updates || []);
+  const refPath = R.reference || r.reference;
+  if (refPath) { ref = new Image(); ref.src = '/file/' + refPath; await ref.decode().catch(() => { ref = null; }); }
+  document.title = pid + ' · Character studio';
+  fit(); frameAll(); tools(); layers(); props(); requestAnimationFrame(draw);
+  setInterval(refreshReview, 4000);
+}
+function fit() { const w = $('wrap'); cv.width = w.clientWidth; cv.height = w.clientHeight; }
+
+// ---------- geometry
+const B = n => R.bones.find(b => b.name === n);
+function boneMat(name, posed) {
+  const b = B(name); if (!b) return new DOMMatrix();
+  const m = b.parent ? boneMat(b.parent, posed) : posed ? new DOMMatrix().translate(pose.$x || 0, pose.$y || 0) : new DOMMatrix();
+  const a = posed ? (pose[name] || 0) : 0;
+  return a ? m.multiply(new DOMMatrix().translate(b.x, b.y).rotate(a).translate(-b.x, -b.y)) : m;
+}
+function partMat(p, posed = tool === 'pose') {
+  const m = new DOMMatrix().translate(p.x, p.y).rotate(p.rot).scale(p.s * (p.sx || 1), p.s * (p.sy || 1));
+  return (p.bone && posed) ? boneMat(p.bone, true).multiply(m) : m;
+}
+const tipOf = (b, posed) => boneMat(b.name, posed).transformPoint(new DOMPoint(b.ex, b.ey));
+const headOf = (b, posed) => boneMat(b.name, posed).transformPoint(new DOMPoint(b.x, b.y));
+const toW = e => { const r = cv.getBoundingClientRect(); return [(e.clientX - r.left - view.x) / view.s, (e.clientY - r.top - view.y) / view.s]; };
+function toLocal(p, wx, wy) {           // world point -> pixel of the part's own picture
+  const im = IM[p.file], q = partMat(p, false).inverse().transformPoint(new DOMPoint(wx, wy));
+  return [q.x + im.width / 2, q.y + im.height / 2];
+}
+const spare = p => p.swap && !p.swap.endsWith(':open') && !p.swap.endsWith(':rest');   // spare drawings show only when selected
+const shown = p => !p.hide && IM[p.file] && (!spare(p) || p === selP);
+
+// ---------- pixels
+const scratch = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+function pixel(p, wx, wy) {
+  const im = IM[p.file], [x, y] = toLocal(p, wx, wy);
+  if (x < 0 || y < 0 || x >= im.width || y >= im.height) return null;
+  scratch.canvas.width = scratch.canvas.height = 1; scratch.clearRect(0, 0, 1, 1);
+  scratch.drawImage(im, -Math.floor(x), -Math.floor(y));
+  return scratch.getImageData(0, 0, 1, 1).data;
+}
+function hitPart(wx, wy) {
+  for (let i = R.parts.length - 1; i >= 0; i--) {
+    const p = R.parts[i]; if (!shown(p)) continue;
+    const px = pixel(p, wx, wy); if (px && px[3] > 25) return p;
+  }
+  return null;
+}
+function inBox(p, wx, wy) { const im = IM[p.file], [x, y] = toLocal(p, wx, wy); return x >= -20 && y >= -20 && x < im.width + 20 && y < im.height + 20; }
+function editable(p) {                  // the part's picture as a canvas that brushes can change
+  const im = IM[p.file];
+  if (im instanceof HTMLCanvasElement) return im;
+  const c = document.createElement('canvas'); c.width = im.width; c.height = im.height;
+  c.getContext('2d').drawImage(im, 0, 0); IM[p.file] = c; return c;
+}
+function dab(p, x, y) {
+  const c = editable(p), cg = c.getContext('2d');
+  const r = brush.size / view.s / (p.s * Math.max(p.sx || 1, p.sy || 1));
+  const a = brush.flow, [R0, G0, B0] = tool === 'erase' ? [0, 0, 0] : brush.color;
+  const grad = cg.createRadialGradient(x, y, r * (1 - brush.soft), x, y, r);
+  grad.addColorStop(0, `rgba(${R0},${G0},${B0},${a})`); grad.addColorStop(1, `rgba(${R0},${G0},${B0},0)`);
+  cg.save();
+  cg.globalCompositeOperation = tool === 'erase' ? 'destination-out' : (brush.inside ? 'source-atop' : 'source-over');
+  cg.fillStyle = grad; cg.beginPath(); cg.arc(x, y, r, 0, 7); cg.fill(); cg.restore();
+  dirty.add(p.file);
+  return r;
+}
+function strokeTo(p, from, to) {        // dabs every quarter radius so a fast stroke has no gaps
+  const r = brush.size / view.s / (p.s * Math.max(p.sx || 1, p.sy || 1)), step = Math.max(1, r * .25);
+  const d = Math.hypot(to[0] - from[0], to[1] - from[1]), n = Math.max(1, Math.ceil(d / step));
+  for (let i = 1; i <= n; i++) dab(p, from[0] + (to[0] - from[0]) * i / n, from[1] + (to[1] - from[1]) * i / n);
+}
+
+// ---------- drawing
+function drawMarks(ctx, p, m) {
+  if (!p.marks || !p.marks.length) return;
+  const im = IM[p.file];
+  ctx.save(); ctx.transform(m.a, m.b, m.c, m.d, m.e, m.f); ctx.translate(-im.width / 2, -im.height / 2);
+  ctx.strokeStyle = MARK; ctx.lineCap = ctx.lineJoin = 'round';
+  for (const k of p.marks) {
+    ctx.lineWidth = k.w; ctx.beginPath();
+    k.pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+    if (k.pts.length === 1) ctx.lineTo(k.pts[0][0] + .1, k.pts[0][1]);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+function draw() {
+  if (selP && !S.has(selP)) S = new Set([selP]);
+  if (!selP && S.size) S = new Set();
+  g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, cv.width, cv.height);
+  g.setTransform(view.s, 0, 0, view.s, view.x, view.y);
+  if (ref && +$('ghost').value) { g.globalAlpha = $('ghost').value / 100; g.drawImage(ref, 0, 0); g.globalAlpha = 1; }
+  for (const p of R.parts) {
+    if (!shown(p)) continue;
+    const im = IM[p.file], m = partMat(p);
+    g.save(); g.transform(m.a, m.b, m.c, m.d, m.e, m.f);
+    g.globalAlpha = (p.ghost || 1) * (xray && tool === 'bones' ? .35 : 1); g.drawImage(im, -im.width / 2, -im.height / 2); g.globalAlpha = 1;
+    if (tool === 'bones' && selB && p.bone === selB.name) {
+      g.strokeStyle = '#6fe06f'; g.lineWidth = 2 / view.s / p.s; g.setLineDash([]); g.strokeRect(-im.width / 2, -im.height / 2, im.width, im.height);
+    }
+    if (S.has(p) && tool !== 'pose' && tool !== 'bones') {
+      g.strokeStyle = '#ffd27a'; g.lineWidth = 1.5 / view.s / p.s; g.setLineDash([6 / view.s, 4 / view.s]);
+      g.strokeRect(-im.width / 2, -im.height / 2, im.width, im.height);
+    }
+    g.restore();
+  }
+  if (tool !== 'pose') for (const p of R.parts) if (shown(p)) drawMarks(g, p, partMat(p));
+  if (tool === 'move' && selP && shown(selP) && S.size === 1) drawGizmo(selP);
+  if (drag && drag.band) { const [a, b, c, d] = drag.band; g.strokeStyle = '#ffd27a'; g.lineWidth = 1 / view.s; g.setLineDash([5 / view.s, 4 / view.s]);
+    g.fillStyle = 'rgba(255,210,122,.08)'; g.fillRect(a, b, c - a, d - b); g.strokeRect(a, b, c - a, d - b); g.setLineDash([]); }
+  if (cursor && (tool === 'erase' || tool === 'brush')) {
+    const r = brush.size / view.s;
+    g.lineWidth = 1.5 / view.s; g.setLineDash([]);
+    if (tool === 'brush' && !(picking || keyAlt)) { g.fillStyle = `rgba(${brush.color.join(',')},.35)`; g.beginPath(); g.arc(cursor[0], cursor[1], r, 0, 7); g.fill(); }
+    g.strokeStyle = '#000'; g.beginPath(); g.arc(cursor[0], cursor[1], r, 0, 7); g.stroke();
+    g.strokeStyle = '#fff'; g.beginPath(); g.arc(cursor[0], cursor[1], r + 1.5 / view.s, 0, 7); g.stroke();
+    if (tool === 'brush' && (picking || keyAlt)) { g.strokeStyle = '#fff'; g.beginPath(); g.moveTo(cursor[0] - r, cursor[1]); g.lineTo(cursor[0] + r, cursor[1]);
+      g.moveTo(cursor[0], cursor[1] - r); g.lineTo(cursor[0], cursor[1] + r); g.stroke(); }
+  }
+  if (tool === 'bones' || tool === 'pose') for (const b of R.bones) drawBone(b);
+  requestAnimationFrame(draw);
+}
+function gizmo(p) {
+  const im = IM[p.file], m = partMat(p), w = im.width / 2, h = im.height / 2;
+  const pt = (x, y) => m.transformPoint(new DOMPoint(x, y));
+  const c = pt(0, 0), top = pt(0, -h), up = Math.hypot(top.x - c.x, top.y - c.y) || 1;
+  return { c, top, rot: { x: top.x + (top.x - c.x) / up * 40 / view.s, y: top.y + (top.y - c.y) / up * 40 / view.s },
+    corners: [pt(-w, -h), pt(w, -h), pt(w, h), pt(-w, h)], sides: { r: pt(w, 0), l: pt(-w, 0), b: pt(0, h), t: pt(0, -h) } };
+}
+function drawGizmo(p) {
+  const G = gizmo(p), r = 6 / view.s;
+  g.strokeStyle = '#ffd27a'; g.lineWidth = 1.5 / view.s; g.setLineDash([]);
+  g.beginPath(); G.corners.forEach((q, i) => i ? g.lineTo(q.x, q.y) : g.moveTo(q.x, q.y)); g.closePath(); g.stroke();
+  g.beginPath(); g.moveTo(G.top.x, G.top.y); g.lineTo(G.rot.x, G.rot.y); g.stroke();
+  g.fillStyle = '#ffd27a'; for (const q of G.corners) g.fillRect(q.x - r, q.y - r, 2 * r, 2 * r);
+  g.fillStyle = '#fff'; for (const q of Object.values(G.sides)) { g.beginPath(); g.arc(q.x, q.y, r * .8, 0, 7); g.fill(); g.stroke(); }
+  g.fillStyle = '#7fd0ff'; g.beginPath(); g.arc(G.rot.x, G.rot.y, r * 1.2, 0, 7); g.fill(); g.stroke();
+}
+function hitGizmo(p, wx, wy) {
+  const G = gizmo(p), r = 10 / view.s, near = q => Math.hypot(wx - q.x, wy - q.y) < r;
+  if (near(G.rot)) return { kind: 'rotate' };
+  for (const q of G.corners) if (near(q)) return { kind: 'scale' };
+  for (const [k, q] of Object.entries(G.sides)) if (near(q)) return { kind: 'stretch', axis: (k === 'l' || k === 'r') ? 'x' : 'y' };
+  return null;
+}
+function local(p, wx, wy) {
+  const a = -p.rot * Math.PI / 180, dx = wx - p.x, dy = wy - p.y;
+  return { x: dx * Math.cos(a) - dy * Math.sin(a), y: dx * Math.sin(a) + dy * Math.cos(a) };
+}
+function drawBone(b) {
+  const posed = tool === 'pose', h = headOf(b, posed), t = tipOf(b, posed);
+  const len = Math.hypot(t.x - h.x, t.y - h.y) || 1, w = Math.min(14, len * .14);
+  const nx = -(t.y - h.y) / len, ny = (t.x - h.x) / len;
+  const on = b === selB, bound = selP && selP.bone === b.name;
+  g.fillStyle = on ? 'rgba(255,200,60,.85)' : bound ? 'rgba(120,220,120,.7)' : 'rgba(80,160,255,.55)';
+  g.strokeStyle = 'rgba(0,0,0,.6)'; g.lineWidth = 1.5 / view.s; g.setLineDash([]);
+  g.beginPath(); g.moveTo(h.x, h.y); g.lineTo(h.x + (t.x - h.x) * .2 + nx * w, h.y + (t.y - h.y) * .2 + ny * w);
+  g.lineTo(t.x, t.y); g.lineTo(h.x + (t.x - h.x) * .2 - nx * w, h.y + (t.y - h.y) * .2 - ny * w); g.closePath(); g.fill(); g.stroke();
+  g.fillStyle = on ? '#ff3' : '#fff'; g.beginPath(); g.arc(h.x, h.y, 6 / view.s, 0, 7); g.fill(); g.stroke();
+  if (tool === 'bones') { g.fillStyle = '#ccc'; g.beginPath(); g.arc(t.x, t.y, 4 / view.s, 0, 7); g.fill(); }
+  if (on || view.s > .7) { g.fillStyle = '#fff'; g.font = `${12 / view.s}px system-ui`; g.fillText(b.name, h.x + 8 / view.s, h.y - 6 / view.s); }
+}
+function hitBone(wx, wy, what) {
+  const r = 9 / view.s, posed = tool === 'pose';
+  for (const b of R.bones.slice().reverse()) {
+    const h = headOf(b, posed), t = tipOf(b, posed);
+    if (what === 'head' && Math.hypot(wx - h.x, wy - h.y) < r) return b;
+    if (what === 'tip' && Math.hypot(wx - t.x, wy - t.y) < r) return b;
+    if (what === 'body') {
+      const L2 = (t.x - h.x) ** 2 + (t.y - h.y) ** 2, k = Math.max(0, Math.min(1, ((wx - h.x) * (t.x - h.x) + (wy - h.y) * (t.y - h.y)) / (L2 || 1)));
+      if (Math.hypot(wx - (h.x + k * (t.x - h.x)), wy - (h.y + k * (t.y - h.y))) < r) return b;
+    }
+  }
+  return null;
+}
+
+// ---------- mouse
+let keyAlt = false, xray = false;
+cv.onmousedown = e => {
+  const [wx, wy] = toW(e);
+  if (e.button === 1 || e.button === 2 || space || hand) { e.preventDefault(); drag = { pan: 1, sx: e.clientX, sy: e.clientY, vx: view.x, vy: view.y }; return; }
+  if (tool === 'brush' && (e.altKey || picking)) {        // take the colour you see under the pointer
+    const p = hitPart(wx, wy);
+    if (p) { const px = pixel(p, wx, wy); brush.color = [px[0], px[1], px[2]]; picking = false; brushBox(); say(`Colour taken from ${p.name}.`); }
+    return;
+  }
+  if (tool === 'erase' || tool === 'brush' || tool === 'mark') {
+    // keep working on the selected part while the pointer is on or near it; otherwise take the part under the pointer
+    const under = hitPart(wx, wy), near = selP && shown(selP) && inBox(selP, wx, wy);
+    const p = tool === 'mark' ? (under || (near ? selP : null)) : (near ? selP : under);
+    if (!p) { say('Click on a part.'); return; }
+    if (p !== selP) { selP = p; layers(); props(); }
+    const at = toLocal(p, wx, wy);
+    if (tool === 'mark') {
+      snap(); p.marks = p.marks || [];
+      const m = { w: Math.max(3, 5 / (view.s * p.s)), pts: [at.map(Math.round)] }; p.marks.push(m);
+      drag = { mark: m, p };
+    } else { snapPix(p); dab(p, ...at); drag = { paint: p, last: at }; }
+    return;
+  }
+  if (tool === 'move') {
+    if (selP && shown(selP) && S.size === 1) {
+      const hnd = hitGizmo(selP, wx, wy);
+      if (hnd) { snap(); const p = selP;
+        drag = { hnd, p, a0: Math.atan2(wy - p.y, wx - p.x), rot0: p.rot, d0: Math.hypot(wx - p.x, wy - p.y) || 1, s0: p.s, l0: local(p, wx, wy), sx0: p.sx || 1, sy0: p.sy || 1 };
+        return; }
+    }
+    const p = hitPart(wx, wy);
+    if (p && (e.ctrlKey || e.shiftKey)) {
+      if (S.has(p)) { S.delete(p); if (selP === p) selP = [...S].pop() || null; } else { S.add(p); selP = p; }
+      layers(); props(); return;
+    }
+    if (p) {
+      if (!S.has(p)) S = new Set([p]);
+      selP = p; selB = null; layers(); props(); snap();
+      drag = { group: [...S].map(q => ({ q, x: q.x, y: q.y })), sx: wx, sy: wy };
+    } else { selP = null; S = new Set(); selB = null; layers(); props(); drag = { band: [wx, wy, wx, wy], add: e.ctrlKey || e.shiftKey }; }
+  } else if (tool === 'bones') {
+    if (drag && drag.grow) {                       // the bone grown with E is placed where you click
+      const b = drag.tip; drag = null; selB = b;
+      if (Math.hypot(b.ex - b.x, b.ey - b.y) < 4) { R.bones.pop(); hist.pop(); selB = B(b.parent) || null; }
+      else say(`${b.name} added. Press E to grow the next bone from its tip, or click the parts that belong to it.`);
+      layers(); props(); return;
+    }
+    const head = hitBone(wx, wy, 'head'), tip = hitBone(wx, wy, 'tip'), body = !head && !tip && hitBone(wx, wy, 'body');
+    if (head) { selB = head; snap(); drag = { joint: head, sx: wx, sy: wy }; }
+    else if (tip) { selB = tip; snap(); drag = { tip }; }
+    else if (body) selB = body;
+    else {
+      const p = hitPart(wx, wy);
+      if (p && selB) {                             // attach: with a bone chosen, click its parts (click again to take one off)
+        snap(); p.bone = p.bone === selB.name ? '' : selB.name;
+        say(p.bone ? `${p.name} now moves with ${selB.name}.` : `${p.name} taken off ${selB.name}.`);
+      } else if (selB) selB = null;
+      else if (!R.bones.length) {                  // the first bone is the main bone: drag it out at the hips
+        snap(); const nb = { name: 'hips', parent: null, x: wx, y: wy, ex: wx, ey: wy };
+        R.bones.push(nb); selB = nb; drag = { tip: nb, fresh: true };
+      } else if (p) { selP = p; S = new Set([p]); }
+    }
+    layers(); props();
+  } else if (tool === 'pose') {
+    const main = R.bones.find(b => !b.parent && Math.hypot(wx - headOf(b, true).x, wy - headOf(b, true).y) < 9 / view.s);
+    if (main) { selB = main; drag = { shift: 1, sx: wx, sy: wy, x0: pose.$x || 0, y0: pose.$y || 0 }; return; }
+    const b = hitBone(wx, wy, 'body') || hitBone(wx, wy, 'tip');
+    if (b) { selB = b; const h = headOf(b, true); drag = { rot: b, h, a0: Math.atan2(wy - h.y, wx - h.x), p0: pose[b.name] || 0 }; }
+  }
+};
+window.onmousemove = e => {
+  if (!drag && e.target !== cv) return;
+  cursor = toW(e); keyAlt = e.altKey;
+  cv.style.cursor = (hand || space) ? (drag && drag.pan ? 'grabbing' : 'grab') : (tool === 'erase' || tool === 'brush') ? 'none' : tool === 'mark' ? 'crosshair' : 'default';
+  if (!drag) return;
+  const [wx, wy] = cursor;
+  if (drag.pan) { view.x = drag.vx + e.clientX - drag.sx; view.y = drag.vy + e.clientY - drag.sy; return; }
+  if (drag.paint) { const at = toLocal(drag.paint, wx, wy); strokeTo(drag.paint, drag.last, at); drag.last = at; return; }
+  if (drag.mark) { drag.mark.pts.push(toLocal(drag.p, wx, wy).map(Math.round)); return; }
+  if (drag.hnd) {
+    const p = drag.p, k = drag.hnd.kind;
+    if (k === 'rotate') { let a = drag.rot0 + (Math.atan2(wy - p.y, wx - p.x) - drag.a0) * 180 / Math.PI; if (e.shiftKey) a = Math.round(a / 15) * 15; p.rot = a; }
+    else if (k === 'scale') p.s = drag.s0 * Math.hypot(wx - p.x, wy - p.y) / drag.d0;
+    else { const l = local(p, wx, wy), ax = drag.hnd.axis, r = Math.abs(l[ax]) / Math.max(Math.abs(drag.l0[ax]), 1);
+      if (ax === 'x') p.sx = drag.sx0 * r; else p.sy = drag.sy0 * r; }
+    return;
+  }
+  if (drag.group) { for (const o of drag.group) { o.q.x = o.x + wx - drag.sx; o.q.y = o.y + wy - drag.sy; } }
+  else if (drag.band) { drag.band[2] = wx; drag.band[3] = wy; }
+  else if (drag.joint) {
+    const b = drag.joint, dx = wx - drag.sx, dy = wy - drag.sy, par = b.parent && B(b.parent);
+    if (par && Math.hypot(par.ex - b.x, par.ey - b.y) < 2) { par.ex += dx; par.ey += dy; }
+    if (e.ctrlKey) for (const c of R.bones) if (c.parent === b.name && (Math.hypot(c.x - b.ex, c.y - b.ey) < 2 || Math.hypot(c.x - b.x, c.y - b.y) < 2)) { c.x += dx; c.y += dy; }
+    b.x += dx; b.y += dy; drag.sx = wx; drag.sy = wy;
+  } else if (drag.tip) {
+    const b = drag.tip, dx = wx - b.ex, dy = wy - b.ey;
+    for (const c of R.bones) if (c.parent === b.name && Math.hypot(c.x - b.ex, c.y - b.ey) < 2) { c.x += dx; c.y += dy; }
+    b.ex = wx; b.ey = wy;
+  } else if (drag.shift) { pose.$x = drag.x0 + wx - drag.sx; pose.$y = drag.y0 + wy - drag.sy;
+  } else if (drag.rot) {
+    pose[drag.rot.name] = drag.p0 + (Math.atan2(wy - drag.h.y, wx - drag.h.x) - drag.a0) * 180 / Math.PI;
+  }
+};
+cv.onmouseleave = () => { cursor = null; };
+window.onmouseup = () => {
+  if (drag && drag.grow) return;                 // a bone being grown stays on the pointer until the click
+  if (drag && drag.fresh && Math.hypot(drag.tip.ex - drag.tip.x, drag.tip.ey - drag.tip.y) < 4) { R.bones.pop(); hist.pop(); selB = null; }
+  else if (drag && drag.fresh) say('Main bone (hips) added. Press E to grow the chest from its tip, Shift+E to grow the legs from its joint.');
+  if (drag && drag.band) {
+    const [a, b, c, d] = drag.band, x0 = Math.min(a, c), x1 = Math.max(a, c), y0 = Math.min(b, d), y1 = Math.max(b, d);
+    const inside = R.parts.filter(p => shown(p) && p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1);
+    if (Math.abs(c - a) + Math.abs(d - b) > 4) { S = new Set(inside); selP = inside[inside.length - 1] || null; }
+    drag = null; layers(); props(); if (S.size > 1) say(`${S.size} parts selected. Drag any of them to move them together.`); return;
+  }
+  const changed = drag && (drag.hnd || drag.mark || drag.paint);
+  drag = null; if (changed) { props(); layers(); }
+};
+cv.oncontextmenu = e => e.preventDefault();
+function zoomAt(k, mx, my) {
+  const s = Math.max(.05, Math.min(20, view.s * k)); k = s / view.s;
+  view.x = mx - (mx - view.x) * k; view.y = my - (my - view.y) * k; view.s = s; $('vzoom').textContent = Math.round(s * 100) + '%';
+}
+cv.onwheel = e => {
+  e.preventDefault();
+  const r = cv.getBoundingClientRect(), mx = e.clientX - r.left, my = e.clientY - r.top;
+  const unit = e.deltaMode === 1 ? 33 : 1, dx = e.deltaX * unit, dy = e.deltaY * unit;
+  const mouseWheel = !dx && Math.abs(dy) >= 50 && Number.isInteger(dy);     // a notched mouse wheel, not a touchpad
+  if (e.ctrlKey) zoomAt(Math.exp(-dy * .01), mx, my);                       // pinch on a touchpad, or Ctrl+wheel
+  else if (e.shiftKey) { view.x -= dy || dx; }
+  else if (mouseWheel) zoomAt(dy < 0 ? 1.15 : 1 / 1.15, mx, my);
+  else { view.x -= dx; view.y -= dy; }                                      // two-finger swipe moves the screen
+};
+function frameBox(x0, y0, x1, y1) {
+  const W = cv.width, H = cv.height, s = Math.min(20, .88 * Math.min(W / Math.max(1, x1 - x0), H / Math.max(1, y1 - y0)));
+  view.s = s; view.x = W / 2 - (x0 + x1) / 2 * s; view.y = H / 2 - (y0 + y1) / 2 * s; $('vzoom').textContent = Math.round(s * 100) + '%';
+}
+function frameAll() {
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  for (const p of R.parts.filter(q => !q.hide && IM[q.file])) for (const c of boxOf(p)) {
+    x0 = Math.min(x0, c.x); y0 = Math.min(y0, c.y); x1 = Math.max(x1, c.x); y1 = Math.max(y1, c.y); }
+  if (x0 < x1) frameBox(x0, y0, x1, y1);
+}
+function frameSel() {
+  if (!selP) { frameAll(); return; }
+  const c = boxOf(selP), xs = c.map(q => q.x), ys = c.map(q => q.y);
+  const pad = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)) * .4;
+  frameBox(Math.min(...xs) - pad, Math.min(...ys) - pad, Math.max(...xs) + pad, Math.max(...ys) + pad);
+}
+function boxOf(p) { const m = partMat(p), w = IM[p.file].width / 2, h = IM[p.file].height / 2;
+  return [[-w, -h], [w, -h], [w, h], [-w, h]].map(([u, v]) => m.transformPoint(new DOMPoint(u, v))); }
+let hand = false;
+$('vhand').onclick = () => { hand = !hand; $('vhand').classList.toggle('on', hand); say(hand ? 'Hand: drag to move the screen. Click Hand again to work on parts.' : ''); };
+$('vfit').onclick = frameAll;
+$('vsel').onclick = frameSel;
+$('vin').onclick = () => zoomAt(1.25, cv.width / 2, cv.height / 2);
+$('vout').onclick = () => zoomAt(1 / 1.25, cv.width / 2, cv.height / 2);
+function grow(fromJoint) {                       // Blender's extrude: a new child bone follows the pointer, click to place it
+  if (drag && drag.grow) return;
+  if (!selB) { say(R.bones.length ? 'Click a bone first; the new bone grows out of it.' : 'Drag out the main bone (hips) first: press on the hips and drag up to the waist.'); return; }
+  const at = fromJoint ? [selB.x, selB.y] : [selB.ex, selB.ey], c = cursor || at;
+  const used = new Set(R.bones.map(b => b.name));
+  const name = ((fromJoint ? GROW_JOINT : GROW_TIP)[selB.name] || []).find(n => !used.has(n)) || freeName();
+  snap(); const nb = { name, parent: selB.name, x: at[0], y: at[1], ex: c[0], ey: c[1] };
+  R.bones.push(nb); selB = nb; drag = { tip: nb, grow: true };
+  say(`Growing ${name}: move the pointer to where it ends and click. Esc cancels. (Name can be changed on the right.)`); props();
+}
+function freeName() { const used = new Set(R.bones.map(b => b.name)); for (const n of STD) if (!used.has(n)) return n; let i = 1; while (used.has('bone' + i)) i++; return 'bone' + i; }
+
+// ---------- keys
+window.onkeydown = e => {
+  keyAlt = e.altKey;
+  if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) return;
+  if (e.key === ' ') { space = true; e.preventDefault(); return; }
+  if (e.ctrlKey && e.key.toLowerCase() === 'z') { undo(); e.preventDefault(); return; }
+  if (e.ctrlKey && e.key.toLowerCase() === 's') { save(); e.preventDefault(); return; }
+  if (e.key === 'Alt') e.preventDefault();
+  if (/^[1-6]$/.test(e.key)) { setTool(TOOLS[+e.key - 1][0]); return; }
+  if (e.key === 'Home') { frameAll(); return; }
+  if (e.key === '.') { frameSel(); return; }
+  if (e.key === '+' || e.key === '=') { zoomAt(1.25, cv.width / 2, cv.height / 2); return; }
+  if (e.key === '-') { zoomAt(1 / 1.25, cv.width / 2, cv.height / 2); return; }
+  const big = e.shiftKey ? 10 : 1, k = e.key.toLowerCase();
+  if (['erase', 'brush', 'mark'].includes(tool) && (k === '[' || k === ']')) { brush.size = Math.max(2, Math.min(200, brush.size * (k === ']' ? 1.2 : 1 / 1.2))); brushBox(); return; }
+  if (selP && tool === 'move') {
+    const p = selP, all = [...S], each = f => () => all.forEach(f);
+    const acts = { q: () => p.rot -= big, e: () => p.rot += big, w: () => p.s *= 1 + .01 * big, s: () => p.s /= 1 + .01 * big,
+      arrowleft: each(q => q.x -= big), arrowright: each(q => q.x += big), arrowup: each(q => q.y -= big), arrowdown: each(q => q.y += big),
+      ']': () => move(p, 1), '[': () => move(p, -1), h: each(q => { q.hide = !q.hide; }),
+      t: each(q => { q.ghost = (q.ghost || 1) < 1 ? 1 : .4; }) };
+    if (acts[k]) { snap(); acts[k](); layers(); props(); e.preventDefault(); }
+  }
+  if (tool === 'bones' && k === 'e' && !e.ctrlKey) { grow(e.shiftKey); return; }
+  if (tool === 'bones' && k === 'x') { xray = !xray; props(); return; }
+  if (k === 'escape' && drag && drag.grow) { R.bones.pop(); hist.pop(); selB = B(drag.tip.parent) || null; drag = null; props(); return; }
+  if (selB && (k === 'delete' || k === 'backspace') && tool === 'bones') {
+    snap(); for (const c of R.bones) if (c.parent === selB.name) c.parent = selB.parent;
+    for (const p of R.parts) if (p.bone === selB.name) p.bone = '';
+    R.bones = R.bones.filter(b => b !== selB); selB = null; props(); layers();
+  }
+  if (tool === 'pose' && k === 'r') pose = {};
+};
+window.onkeyup = e => { keyAlt = e.altKey; if (e.key === ' ') { space = false; if (e.target.tagName === 'BUTTON') e.preventDefault(); } };
+document.addEventListener('click', e => { if (e.target.tagName === 'BUTTON') e.target.blur(); });   // Space must not press the last button
+function move(p, d) { const i = R.parts.indexOf(p), j = Math.max(0, Math.min(R.parts.length - 1, i + d)); R.parts.splice(i, 1); R.parts.splice(j, 0, p); }
+
+// ---------- panels
+function setTool(t) { tool = t; picking = false; if (t !== 'pose') pose = {}; tools(); props(); }
+function tools() {
+  $('tools').innerHTML = TOOLS.map(([t, label]) => `<button data-t="${t}" class="${t === tool ? 'on' : ''}">${label}</button>`).join('');
+  document.querySelectorAll('#tools button').forEach(b => b.onclick = () => setTool(b.dataset.t));
+  $('help').innerHTML = {
+    move: `<b>Move / size.</b> Drag a part to move it. On the selected part: <b>blue handle</b> turns it (Shift: 15° steps), <b>corners</b> resize, <b>side dots</b> stretch.<br>Keys: Q/E turn · W/S size · arrows nudge (Shift ×10) · <b>[ ]</b> behind / in front · H hide · <b>T</b> see-through.<br><b>Several parts:</b> Ctrl+click them (here or in the list), or drag a box around them on empty space; then drag any one to move them all.`,
+    erase: `<b>Soft eraser.</b> Paint over a part's edge to fade it, so it melts into the part under it. Works on the selected part (or the one you click).<br><b>[ ]</b> brush size.`,
+    brush: `<b>Colour brush.</b> <b>Alt+click</b> (or "Pick colour") takes a colour from any part, then paint it on the joint so both parts match. "Only on the part" keeps paint inside the part's own shape.<br><b>[ ]</b> brush size.`,
+    mark: `<b>Mark a fix.</b> Scribble on what is wrong, write what you want in the box on the right (Hindi or English), and press <b>Send to Claude</b>. Claude has it made, removes the background and puts it in place here by itself. Every version stays under <b>Tries</b>: click one to switch back.`,
+    bones: `<b>Bones, built like in Blender.</b>
+      <br><b>1. Main bone:</b> press at the bottom of the hips and drag up to the waist. This is <b>hips</b>; everything hangs from it.
+      <br><b>2. Grow the rest:</b> click a bone, press <b>E</b> and click where the new bone ends. It starts at the tip of the one you chose.
+      From <b>hips</b>: E → chest. From <b>chest</b>: E → neck, then E → near shoulder, E → far shoulder. Shoulder → upper arm → forearm → hand. Neck → head.
+      Legs: click hips, <b>Shift+E</b> grows from its joint → thigh → shin → foot. Names are given in this order (n_ = near side, f_ = far side); change one on the right if needed.
+      <br><b>3. Attach:</b> click a bone, then click every part that belongs to it (green outline). Click a part again to take it off. Parts named like a bone are attached already.
+      <br><b>4. Check</b> often with <b>6 Test bending</b>.
+      <br>Drag a white joint or grey tip to move it (Ctrl: the bones on it come along). <b>X</b> see-through body. Delete removes a bone. Esc cancels growing.`,
+    pose: `<b>Test bending.</b> Drag any bone to turn it; children follow. Drag the white joint of <b>hips</b> to move the whole character. <b>R</b> resets. If a joint shows a gap or a line, go back and fix it.`,
+  }[tool] + `<br><span class="dim"><b>Screen:</b> drag with the middle or right mouse button, or hold Space and drag, or the ✋ Hand button · touchpad: two fingers move, pinch zooms · mouse wheel zooms · Home shows everything.</span>`;
+  brushBox();
+}
+function brushBox() {
+  const el = $('brushbox');
+  if (!['erase', 'brush', 'mark'].includes(tool)) { el.innerHTML = ''; return; }
+  const hex = '#' + brush.color.map(v => v.toString(16).padStart(2, '0')).join('');
+  el.innerHTML = `<div class="box">
+    ${tool === 'brush' ? `<div class="row"><input type="color" id="swatch" value="${hex}"><button id="bpick" class="${picking ? 'on' : ''}">Pick colour</button>
+      <label style="margin:0"><input type="checkbox" id="binside" ${brush.inside ? 'checked' : ''}> Only on the part</label></div>` : ''}
+    ${tool !== 'mark' ? `<label>Size</label><input type="range" id="bsize" min="2" max="200" value="${Math.round(brush.size)}">
+    <label>Softness</label><input type="range" id="bsoft" min="0" max="100" value="${brush.soft * 100}">
+    <label>Strength</label><input type="range" id="bflow" min="2" max="100" value="${brush.flow * 100}">` : ''}
+    ${selP ? `<div class="dim" style="margin-top:6px">Working on: <b style="color:#ffd27a">${selP.name}</b></div>` : ''}</div>`;
+  const on = (id, ev, fn) => { const x = $(id); if (x) x[ev] = fn; };
+  on('swatch', 'oninput', e => { const v = e.target.value; brush.color = [1, 3, 5].map(i => parseInt(v.slice(i, i + 2), 16)); });
+  on('bpick', 'onclick', () => { picking = !picking; brushBox(); say(picking ? 'Click on the colour you want.' : ''); });
+  on('binside', 'onchange', e => brush.inside = e.target.checked);
+  on('bsize', 'oninput', e => brush.size = +e.target.value);
+  on('bsoft', 'oninput', e => brush.soft = e.target.value / 100);
+  on('bflow', 'oninput', e => brush.flow = e.target.value / 100);
+}
+function props() {
+  brushBox();
+  let h = '';
+  if (tool === 'bones') h += `<div class="box"><div class="row"><button id="bgrow" ${selB ? '' : 'disabled'}>Grow from tip (E)</button>
+      <button id="bgrowj" ${selB ? '' : 'disabled'}>Grow from joint (Shift+E)</button></div>
+      <div class="row"><button id="bxray" class="${xray ? 'on' : ''}">See-through body (X)</button><button id="auto">Auto-attach</button></div>
+      <div class="row"><button id="stdsk" title="Puts every usual bone at a guessed place at once">Whole skeleton at once</button></div>
+      ${selB ? `<div class="dim">Parts on <b style="color:#6fe06f">${selB.name}</b>: ${R.parts.filter(q => q.bone === selB.name).map(q => q.name).join(', ') || 'none yet: click them'}</div>` : ''}</div>`;
+  if (S.size > 1) h += `<div class="box"><b>${S.size} parts selected</b><div class="dim">${[...S].map(q => q.name).join(', ')}</div>
+      <label>See-through (only in this editor)</label><input type="range" id="pghost" min="10" max="100" value="${Math.round((selP.ghost || 1) * 100)}"></div>`;
+  else if (selP) {
+    h += `<div class="box"><b>${selP.name}</b>
+      <label>See-through (only in this editor, T)</label><input type="range" id="pghost" min="10" max="100" value="${Math.round((selP.ghost || 1) * 100)}">
+      <label>Name</label><input type="text" id="pname" value="${selP.name}">
+      <div class="row"><span>Turn <input type="text" id="prot" value="${Math.round(selP.rot * 10) / 10}" style="width:52px"></span>
+        <span>Size <input type="text" id="ps" value="${Math.round(selP.s * 1000) / 1000}" style="width:52px"></span></div>
+      <div class="row"><span>Width <input type="text" id="psx" value="${Math.round((selP.sx || 1) * 1000) / 1000}" style="width:52px"></span>
+        <span>Height <input type="text" id="psy" value="${Math.round((selP.sy || 1) * 1000) / 1000}" style="width:52px"></span>
+        <button id="preset" style="padding:4px 8px">Reset</button></div>
+      <label>Moves with bone</label><select id="pbone"><option value=""></option>${R.bones.map(b => `<option ${b.name === selP.bone ? 'selected' : ''}>${b.name}</option>`).join('')}</select>
+      <label>Swap drawing</label><select id="pswap">${SWAPS.map(s => `<option value="${s}" ${s === (selP.swap || '') ? 'selected' : ''}>${s || '(always shown)'}</option>`).join('')}</select>
+      </div>${fixHtml(selP)}`;
+  }
+  if (selB && tool === 'bones') {
+    const opts = [...new Set([...STD, selB.name])];
+    h += `<div class="box"><label>Bone name</label><select id="bname">${opts.map(n => `<option ${n === selB.name ? 'selected' : ''}>${n}</option>`).join('')}</select>
+      <label>Parent</label><select id="bpar"><option value=""></option>${R.bones.filter(b => b !== selB).map(b => `<option ${b.name === selB.parent ? 'selected' : ''}>${b.name}</option>`).join('')}</select></div>`;
+  }
+  const keep = $('fnote') && $('fnote').dataset.f === (selP && selP.file) ? $('fnote').value : '';
+  $('props').innerHTML = h;
+  if ($('fnote')) { $('fnote').dataset.f = selP.file; $('fnote').value = keep; }
+  const on = (id, ev, fn) => { const el = $(id); if (el) el[ev] = fn; };
+  on('pname', 'oninput', e => { selP.name = e.target.value; unsaved = true; layers(); });
+  on('pghost', 'onpointerdown', () => snap());
+  on('pghost', 'oninput', e => { for (const q of S) q.ghost = e.target.value / 100; });
+  on('pbone', 'onchange', e => { snap(); selP.bone = e.target.value; layers(); });
+  for (const [id, key] of [['prot', 'rot'], ['ps', 's'], ['psx', 'sx'], ['psy', 'sy']])
+    on(id, 'onchange', e => { const v = parseFloat(e.target.value); if (!isNaN(v)) { snap(); selP[key] = v; } });
+  on('preset', 'onclick', () => { snap(); selP.sx = selP.sy = 1; selP.rot = 0; props(); });
+  on('pswap', 'onchange', e => { snap(); selP.swap = e.target.value; layers(); });
+  on('bname', 'onchange', e => { snap(); const old = selB.name, nn = e.target.value;
+    for (const b of R.bones) if (b.parent === old) b.parent = nn; for (const p of R.parts) if (p.bone === old) p.bone = nn; selB.name = nn; layers(); });
+  on('bpar', 'onchange', e => { snap(); selB.parent = e.target.value || null; });
+  on('stdsk', 'onclick', standardSkeleton);
+  on('bgrow', 'onclick', () => grow(false));
+  on('bgrowj', 'onclick', () => grow(true));
+  on('bxray', 'onclick', () => { xray = !xray; props(); });
+  on('auto', 'onclick', autoAttach);
+  on('fsend', 'onclick', () => sendFix(selP));
+  on('fresend', 'onclick', () => sendFix(selP, $('fprompt').value));
+  on('fclear', 'onclick', () => { snap(); selP.marks = []; props(); layers(); });
+  document.querySelectorAll('.try').forEach(im => im.onclick = () => useTry(selP, +im.dataset.k));
+}
+
+// ---------- fixing a part with ChatGPT
+function fixHtml(p) {
+  const info = INFO[p.file] || {}, rv = info.review, n = (p.marks || []).length;
+  let h = `<div class="box"><b>Fix with ChatGPT</b>
+    <div class="row"><span class="dim">${n ? n + ' mark(s) on this part' : 'No marks yet (tool 4)'}</span>${n ? '<button id="fclear" style="padding:3px 8px">Clear marks</button>' : ''}</div>
+    <textarea id="fnote" rows="3" placeholder="What is wrong? e.g. 'kamar ke neeche lehenga ka hissa hata do, chest belt par khatam ho'"></textarea>
+    <div class="row"><button class="go" id="fsend">Send to Claude</button></div>
+    ${(info.requests || []).slice().reverse().map(q => `<div class="dim" style="margin:4px 0">
+      <span style="color:${q.status === 'done' ? '#9fd49f' : '#ffd27a'}">${{ new: '● Waiting for Claude', working: '● Claude is working on it', done: '✓ Done' }[q.status] || q.status}</span>
+      — “${q.note.replace(/</g, '&lt;')}”${q.reply ? `<br><span style="color:#ddd">Claude: ${q.reply.replace(/</g, '&lt;')}</span>` : ''}</div>`).join('')}
+    ${rv && rv.busy ? '<div class="dim">ChatGPT is drawing… (1-3 min)</div>' : ''}`;
+  if (rv) {
+    const tries = [];
+    if (rv.original) tries.push({ k: 0, thumb: rv.original, title: 'before ChatGPT' });
+    for (const v of rv.variants) tries.push({ k: v.k, thumb: v.thumb, title: 'try ' + v.k });
+    h += `<label>Tries (click to use · yellow = in use)</label><div class="row">${tries.map(t =>
+      `<img class="try ${t.k === (rv.picked || 0) ? 'on' : ''}" src="${t.thumb}" data-k="${t.k}" title="${t.title}">`).join('')}</div>`;
+    if (rv.asked && rv.asked.length) h += `<div class="dim">You asked: ${rv.asked.map(c => '“' + c + '”').join(' · ')}</div>`;
+    if (rv.prompt) h += `<details style="margin-top:6px"><summary class="dim">Last prompt sent to ChatGPT (edit and send it yourself)</summary>
+      <textarea id="fprompt" rows="9">${rv.prompt.replace(/</g, '&lt;')}</textarea><button id="fresend" ${rv.busy ? 'disabled' : ''}>Send this prompt</button></details>`;
+  }
+  return h + '</div>';
+}
+function drawPartWithMarks(ctx, p, x, y, k) {         // the part's picture and its marks, top-left at x, y, scaled by k
+  const im = IM[p.file];
+  ctx.drawImage(im, x, y, im.width * k, im.height * k);
+  drawMarks(ctx, p, new DOMMatrix().translate(x + im.width * k / 2, y + im.height * k / 2).scale(k));
+}
+function fixImages(p) {
+  const im = IM[p.file], tall = im.height >= im.width, W = tall ? 1024 : 1536, H = tall ? 1536 : 1024;
+  const k = Math.min(.62 * W / im.width, .62 * H / im.height);
+  // image 1: this part alone on flat green, with the user's marks
+  const a = document.createElement('canvas'); a.width = W; a.height = H;
+  const ag = a.getContext('2d'); ag.fillStyle = '#00ff00'; ag.fillRect(0, 0, W, H);
+  const thick = (p.marks || []).map(m => m.w); (p.marks || []).forEach(m => m.w = Math.max(m.w, 6 / k));
+  const cl = document.createElement('canvas'); cl.width = W; cl.height = H;
+  const clg = cl.getContext('2d'); clg.fillStyle = '#00ff00'; clg.fillRect(0, 0, W, H);
+  clg.drawImage(im, W / 2 - im.width * k / 2, H / 2 - im.height * k / 2, im.width * k, im.height * k);
+  drawPartWithMarks(ag, p, W / 2 - im.width * k / 2, H / 2 - im.height * k / 2, k);
+  (p.marks || []).forEach((m, i) => m.w = thick[i]);
+  // image 2: the whole character as put together now, all marks, this part in an orange dashed box
+  const vis = R.parts.filter(q => !q.hide && IM[q.file] && !spare(q));
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  const corners = q => { const m = partMat(q, false), w = IM[q.file].width / 2, h = IM[q.file].height / 2;
+    return [[-w, -h], [w, -h], [w, h], [-w, h]].map(([u, v]) => m.transformPoint(new DOMPoint(u, v))); };
+  for (const q of vis) for (const c of corners(q)) { x0 = Math.min(x0, c.x); y0 = Math.min(y0, c.y); x1 = Math.max(x1, c.x); y1 = Math.max(y1, c.y); }
+  x0 -= 40; y0 -= 40; x1 += 40; y1 += 40;
+  const S = Math.min(2, 1400 / Math.max(x1 - x0, y1 - y0));
+  const b = document.createElement('canvas'); b.width = Math.round((x1 - x0) * S); b.height = Math.round((y1 - y0) * S);
+  const bg = b.getContext('2d'); bg.fillStyle = '#d9d4cc'; bg.fillRect(0, 0, b.width, b.height);
+  bg.setTransform(S, 0, 0, S, -x0 * S, -y0 * S);
+  for (const q of vis) { const m = partMat(q, false), qi = IM[q.file]; bg.save(); bg.transform(m.a, m.b, m.c, m.d, m.e, m.f); bg.drawImage(qi, -qi.width / 2, -qi.height / 2); bg.restore(); }
+  for (const q of vis) drawMarks(bg, q, partMat(q, false));
+  const c = corners(p); bg.strokeStyle = '#ff8a00'; bg.lineWidth = 4 / S; bg.setLineDash([14 / S, 9 / S]);
+  bg.beginPath(); c.forEach((q, i) => i ? bg.lineTo(q.x, q.y) : bg.moveTo(q.x, q.y)); bg.closePath(); bg.stroke();
+  return { part_png: a.toDataURL('image/png'), clean_png: cl.toDataURL('image/png'), context_png: b.toDataURL('image/png'), k, W, H };
+}
+async function sendFix(p, prompt) {
+  const note = ($('fnote') && $('fnote').value.trim()) || '';
+  if (!prompt && !note) { say('First write what is wrong (Hindi or English is fine).'); $('fnote').focus(); return; }
+  if (!prompt && !(p.marks || []).length && !confirm('There are no marks on this part. Send only your words?')) return;
+  await save();
+  const imgs = fixImages(p);
+  const r = prompt ? await post('/api/puppet/fix', { id: pid, file: p.file, note, prompt, ...imgs })
+                   : await post('/api/puppet/ask', { id: pid, file: p.file, note, ...imgs });
+  const j = await r.json().catch(() => ({}));
+  if (j.ok && !prompt) { $('fnote').value = ''; }
+  say(j.ok ? (prompt ? `Sent your prompt to ChatGPT; the try appears in this panel (1-3 min).`
+                     : `Sent to Claude. Claude makes it, removes the background and puts it in place here by itself.`) : (j.error || 'Could not send.'));
+  refreshReview(true);
+}
+async function useTry(p, k) {
+  if (dirty.has(p.file) && !confirm('Your brush changes on this part will be replaced by this try. Continue?')) return;
+  const r = await post('/api/puppet/use', { id: pid, file: p.file, k });
+  const j = await r.json().catch(() => ({}));
+  if (!j.ok) { say(j.error || 'Could not use it.'); return; }
+  snap();
+  const c = partMat(p, false).transformPoint(new DOMPoint(j.delta[0], j.delta[1]));   // keep it where it was drawn
+  p.x = c.x; p.y = c.y; p.marks = [];
+  dirty.delete(p.file); await loadImage(p.file);
+  await save(); refreshReview(true);
+  say(k ? `Using try ${k}. Check the joints; move or size it if needed.` : 'Back to the picture from before ChatGPT.');
+}
+async function applyUpdates(ups) {
+  if (!ups.length) return;
+  const done = [];
+  for (const u of ups) {
+    if (u.op === 'replace') {
+      const p = R.parts.find(q => q.file === u.file); if (!p) { done.push(u.id); continue; }
+      snap(); dirty.delete(p.file);
+      const c = partMat(p, false).transformPoint(new DOMPoint(u.delta[0], u.delta[1]));
+      p.x = c.x; p.y = c.y; p.marks = []; await loadImage(p.file);
+    } else if (u.op === 'add') {
+      const par = R.parts.find(q => q.file === u.parent); if (!par) { done.push(u.id); continue; }
+      snap(); await loadImage(u.file);
+      const c = partMat(par, false).transformPoint(new DOMPoint(u.local[0], u.local[1]));
+      let p = R.parts.find(q => q.file === u.file);
+      if (p) R.parts.splice(R.parts.indexOf(p), 1);
+      p = { file: u.file, name: u.name, x: c.x, y: c.y, rot: par.rot, s: par.s, sx: par.sx || 1, sy: par.sy || 1, bone: par.bone, swap: u.swap || '', hide: false };
+      R.parts.splice(R.parts.indexOf(par) + 1 + (u.order || 0), 0, p);
+    } else if (u.op === 'remove') {
+      const p = R.parts.find(q => q.file === u.file); if (p) { snap(); R.parts.splice(R.parts.indexOf(p), 1); if (selP === p) selP = null; }
+    }
+    done.push(u.id);
+    if (u.say) say('Claude: ' + u.say);
+  }
+  await save();
+  await post('/api/puppet/applied', { id: pid, ids: done });
+  layers(); props();
+}
+async function refreshReview(force) {
+  const r = await (await fetch('/api/puppet?id=' + pid)).json();
+  if (r.updates && r.updates.length && !drag) { for (const p of r.parts) INFO[p.file] = p; await applyUpdates(r.updates); }
+  let changed = false;
+  for (const p of r.parts) {
+    const prev = INFO[p.file] || {}, was = prev.review || {}, now = p.review || {};
+    if (JSON.stringify(was) !== JSON.stringify(now) || JSON.stringify(prev.requests) !== JSON.stringify(p.requests)) changed = true;
+    if (was.busy && !now.busy && now.variants && now.variants.length > (was.variants || []).length) say(`New try from ChatGPT for ${p.name}. Click it in the panel to use it.`);
+    INFO[p.file] = p;
+  }
+  const typing = document.activeElement && ['fnote', 'fprompt', 'pname'].includes(document.activeElement.id);
+  if ((changed || force) && selP && !typing) props();
+}
+
+// ---------- skeleton helpers
+function figureBox() {
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  for (const p of R.parts.filter(q => !q.hide && IM[q.file])) { const im = IM[p.file], w = im.width * p.s / 2, h = im.height * p.s / 2;
+    x0 = Math.min(x0, p.x - w); x1 = Math.max(x1, p.x + w); y0 = Math.min(y0, p.y - h); y1 = Math.max(y1, p.y + h); }
+  return [x0, y0, x1, y1];
+}
+function standardSkeleton() {
+  snap();
+  const [x0, y0, x1, y1] = figureBox(), W = x1 - x0, cx = (x0 + x1) / 2, fx = f => cx + (f - .5) * W * .6, fy = f => y0 + f * (y1 - y0);
+  R.bones = STD.map(n => { const [a, b, c, d] = STD_POS[n]; return { name: n, parent: STD_PARENT[n] || null, x: fx(a), y: fy(b), ex: fx(c), ey: fy(d) }; });
+  selB = null; say('Drag each joint (white dot) onto the body. Ctrl while dragging moves the child joints too.'); props();
+}
+function autoAttach() {
+  snap();
+  for (const p of R.parts) {
+    if (p.bone) continue;
+    if (B(p.name)) { p.bone = p.name; continue; }          // a part named like a bone goes on that bone
+    let best = null, bd = 1e9;
+    for (const b of R.bones) {
+      const L2 = (b.ex - b.x) ** 2 + (b.ey - b.y) ** 2, k = Math.max(0, Math.min(1, ((p.x - b.x) * (b.ex - b.x) + (p.y - b.y) * (b.ey - b.y)) / (L2 || 1)));
+      const d = Math.hypot(p.x - (b.x + k * (b.ex - b.x)), p.y - (b.y + k * (b.ey - b.y)));
+      if (d < bd) { bd = d; best = b; }
+    }
+    if (best) p.bone = best.name;
+  }
+  layers(); props(); say('Parts attached. Check the green bone names in the list.');
+}
+function layers() {
+  const el = $('layers');
+  if (selP && !S.has(selP)) S = new Set([selP]);
+  el.innerHTML = R.parts.slice().reverse().map(p => `<div class="lay ${S.has(p) ? 'sel' : ''}" draggable="true" data-f="${p.file}" style="${(p.ghost || 1) < 1 ? 'opacity:.6' : ''}">
+    <span class="eye" data-eye="${p.file}">${p.hide ? '·' : '👁'}</span><img src="${IM[p.file] ? (IM[p.file].src || IM[p.file].toDataURL()) : ''}">
+    <span class="nm">${p.name}<br><span class="bn">${p.bone || ''}${p.swap ? ' · ' + p.swap : ''}</span>${(p.marks || []).length ? ' <span class="mk">● marked</span>' : ''}</span></div>`).join('');
+  el.querySelectorAll('.lay').forEach(row => {
+    const p = R.parts.find(q => q.file === row.dataset.f);
+    row.onclick = e => {
+      if (e.target.dataset.eye) { snap(); p.hide = !p.hide; layers(); return; }
+      if (e.ctrlKey || e.shiftKey) { if (S.has(p)) { S.delete(p); if (selP === p) selP = [...S].pop() || null; } else { S.add(p); selP = p; } }
+      else { S = new Set([p]); selP = p; }
+      selB = null; layers(); props();
+    };
+    row.ondragstart = e => e.dataTransfer.setData('text', p.file);
+    row.ondragover = e => { e.preventDefault(); row.classList.add('drop'); };
+    row.ondragleave = () => row.classList.remove('drop');
+    row.ondrop = e => { e.preventDefault(); snap(); const f = e.dataTransfer.getData('text'), a = R.parts.find(q => q.file === f);
+      if (a === p) return; R.parts.splice(R.parts.indexOf(a), 1); R.parts.splice(R.parts.indexOf(p) + 1, 0, a); layers(); };
+  });
+}
+async function save() {
+  for (const f of [...dirty]) {
+    const r = await post('/api/puppet/part', { id: pid, name: f.replace('.png', ''), png: IM[f].toDataURL('image/png') });
+    if (!r.ok) { say('Could not save the picture of ' + f); return; }
+    dirty.delete(f);
+  }
+  const r = await post('/api/puppet', { id: pid, layout: R });
+  if (r.ok) { unsaved = false; say('Saved.'); } else say('Save failed.');
+}
+$('save').onclick = save;
+$('undo').onclick = undo;
+window.onresize = fit;
+window.onbeforeunload = e => { if (unsaved || dirty.size) { e.preventDefault(); return ''; } };
+init();
+</script>
+</body></html>

@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Asset room</title>
+<style>
+  :root { --bg: #17140f; --card: #221d16; --line: #3a3126; --text: #eee5d6; --dim: #a8987f; --accent: #e0a040; --ok: #7fb069; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 "Segoe UI", system-ui, sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; display: flex; gap: 18px; align-items: center; padding: 12px 22px;
+           background: #120f0b; border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+  header .status { color: var(--dim); font-size: 13px; }
+  nav button { background: none; border: 1px solid var(--line); color: var(--dim); padding: 5px 12px; border-radius: 16px; cursor: pointer; }
+  nav button.on { color: var(--text); border-color: var(--accent); }
+  main { display: grid; grid-template-columns: 1fr 330px; gap: 20px; padding: 20px 22px; align-items: start; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 18px; }
+  .card h2 { margin: 0; font-size: 16px; font-weight: 600; display: flex; gap: 10px; align-items: baseline; }
+  .tag { font-size: 12px; color: var(--dim); font-weight: 400; }
+  .tag.busy { color: var(--accent); }
+  .tag.done { color: var(--ok); }
+  details { margin: 6px 0 10px; color: var(--dim); font-size: 13px; }
+  details p { margin: 6px 0; white-space: pre-wrap; }
+  .variants { display: flex; flex-wrap: wrap; gap: 12px; }
+  .v { width: 250px; border: 2px solid transparent; border-radius: 8px; padding: 6px; background: #1a1610; }
+  .v.picked { border-color: var(--ok); }
+  .v img { width: 100%; height: 250px; object-fit: contain; cursor: zoom-in; border-radius: 4px;
+           background: repeating-conic-gradient(#8a8a8a 0 25%, #a9a9a9 0 50%) 0 0 / 18px 18px; }
+  .v audio { width: 100%; margin: 8px 0 4px; }
+  .v .row { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; font-size: 13px; color: var(--dim); }
+  button.act { background: var(--accent); color: #1a1208; border: 0; border-radius: 6px; padding: 5px 12px; font-weight: 600; cursor: pointer; }
+  button.act.ghost { background: none; color: var(--text); border: 1px solid var(--line); font-weight: 400; }
+  button:disabled { opacity: .45; cursor: default; }
+  .talk { display: flex; gap: 8px; margin-top: 12px; }
+  .talk textarea { flex: 1; min-height: 38px; resize: vertical; background: #15110c; color: var(--text); border: 1px solid var(--line);
+                   border-radius: 6px; padding: 7px 9px; font: inherit; font-size: 14px; }
+  .talk .btns { display: flex; flex-direction: column; gap: 6px; }
+  .history { font-size: 12.5px; color: var(--dim); margin-top: 8px; }
+  .history b { color: var(--text); font-weight: 600; }
+  aside { position: sticky; top: 70px; }
+  aside h3 { margin: 0 0 8px; font-size: 14px; color: var(--dim); font-weight: 600; }
+  #log { background: #100d09; border: 1px solid var(--line); border-radius: 8px; padding: 10px; height: 70vh; overflow: auto;
+         font: 12px/1.5 Consolas, monospace; color: #cbbca4; white-space: pre-wrap; }
+  .empty { color: var(--dim); padding: 30px 0; }
+  #zoom { position: fixed; inset: 0; background: rgba(0,0,0,.88); display: none; align-items: center; justify-content: center; z-index: 9; cursor: zoom-out; }
+  #zoom img { max-width: 94vw; max-height: 94vh; background: repeating-conic-gradient(#8a8a8a 0 25%, #a9a9a9 0 50%) 0 0 / 24px 24px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Asset room</h1>
+  <nav id="tabs"></nav>
+  <span class="status" id="status"></span>
+</header>
+<main>
+  <section id="list"></section>
+  <aside><h3>What is happening</h3><div id="log"></div></aside>
+</main>
+<div id="zoom" onclick="this.style.display='none'"><img alt=""></div>
+
+<script>
+'use strict';
+// The room asks the desk (room.py) for the state every few seconds and redraws only when something changed.
+// Text typed into a box is kept across redraws.
+const TABS = [['pick', 'Your turn'], ['busy', 'Being made'], ['done', 'Picked'], ['all', 'All']];
+let tab = 'pick', last = '', state = { jobs: [], log: [] };
+const drafts = {};
+
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const group = j => j.busy ? 'busy' : j.picked ? 'done' : 'pick';
+
+async function post(path, body) {
+  const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Room': '1' }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) alert(j.error || 'That did not work');
+  await refresh(true);
+}
+
+function card(j) {
+  const busy = j.busy ? `<span class="tag busy">${j.busy === 'working' ? 'being made now…' : 'waiting in line…'}</span>` : '';
+  const picked = j.picked ? `<span class="tag done">picked v${j.picked}</span>` : '';
+  const vs = j.variants.map(v => `
+    <div class="v ${j.picked === v.k ? 'picked' : ''}">
+      ${v.kind === 'image' ? `<img src="${v.thumb}" data-full="${v.url}" loading="lazy" alt="v${v.k}">`
+                           : `<audio controls preload="none" src="${v.url}"></audio>`}
+      <div class="row"><span>v${v.k} · ${esc(v.time.slice(5))}</span>
+        <button class="act ${j.picked === v.k ? 'ghost' : ''}" ${j.busy ? 'disabled' : ''} onclick="post('/api/pick', {id: '${j.id}', k: ${v.k}})">${j.picked === v.k ? 'Picked' : 'Pick'}</button></div>
+    </div>`).join('') || '<div class="empty">Nothing made yet.</div>';
+  const hist = [...j.log].reverse().slice(0, 4).map(h => `<div><b>${h.who === 'user' ? 'You' : 'Claude'}</b> ${esc(h.action)} ${esc(h.text)} <span>· ${esc(h.time.slice(5))}</span></div>`).join('');
+  const open = j.inbox.filter(n => !n.done && n.who === 'user').length;
+  return `
+  <div class="card" data-id="${esc(j.id)}">
+    <h2>${esc(j.id)} <span class="tag">${esc(j.recipe)} · ${esc(j.site)}</span> ${picked} ${busy}
+        ${open ? `<span class="tag busy">${open} note${open > 1 ? 's' : ''} for Claude</span>` : ''}</h2>
+    <details><summary>Prompt${j.corrections.length ? ` and ${j.corrections.length} correction(s)` : ''}</summary>
+      <p>${esc(j.prompt)}</p>${j.corrections.map(c => `<p>+ ${esc(c)}</p>`).join('')}</details>
+    <div class="variants">${vs}</div>
+    <div class="talk">
+      <textarea placeholder="What should change? (for a redo) — or a note for Claude" data-draft="${esc(j.id)}">${esc(drafts[j.id] || '')}</textarea>
+      <div class="btns">
+        <button class="act" ${j.busy ? 'disabled' : ''} onclick="redo('${j.id}', 1)">Redo</button>
+        <button class="act ghost" ${j.busy ? 'disabled' : ''} onclick="redo('${j.id}', 2)">Redo ×2</button>
+        <button class="act ghost" ${j.busy ? 'disabled' : ''} onclick="note('${j.id}')">Note for Claude</button>
+      </div>
+    </div>
+    ${hist ? `<div class="history">${hist}</div>` : ''}
+  </div>`;
+}
+
+function redo(id, n) { const note = drafts[id] || ''; drafts[id] = ''; post('/api/redo', { id, note, n }); }
+function note(id) {
+  const text = (drafts[id] || '').trim();
+  if (!text) return alert('Type the note first.');
+  drafts[id] = ''; post('/api/note', { id, text });
+}
+
+function draw() {
+  const counts = Object.fromEntries(TABS.map(([k]) => [k, k === 'all' ? state.jobs.length : state.jobs.filter(j => group(j) === k).length]));
+  document.getElementById('tabs').innerHTML = TABS.map(([k, label]) =>
+    `<button class="${k === tab ? 'on' : ''}" onclick="tab='${k}'; draw()">${label} (${counts[k]})</button>`).join(' ');
+  const jobs = state.jobs.filter(j => tab === 'all' || group(j) === tab);
+  document.getElementById('list').innerHTML = jobs.map(card).join('') ||
+    `<div class="empty">${tab === 'pick' ? 'Nothing is waiting for you.' : 'Nothing here.'}</div>`;
+  document.getElementById('status').textContent = state.queue ? `${state.queue} redo(s) waiting` : '';
+  const log = document.getElementById('log');
+  const atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 20;
+  log.textContent = state.log.join('\n') || 'Nothing yet.';
+  if (atEnd) log.scrollTop = log.scrollHeight;
+}
+
+async function refresh(force) {
+  try {
+    const s = await (await fetch('/api/state', { cache: 'no-store' })).json();
+    const sig = JSON.stringify(s);
+    if (sig === last && !force) return;
+    state = s;
+    // don't redraw under the user's hands while they type or play a sound (it is tried again next time)
+    const playing = [...document.querySelectorAll('audio')].some(a => !a.paused);
+    const typing = document.activeElement?.tagName === 'TEXTAREA';
+    if ((playing || typing) && !force) return;
+    last = sig;
+    draw();
+  } catch { document.getElementById('status').textContent = 'room.py is not running'; }
+}
+
+document.addEventListener('input', e => { if (e.target.dataset.draft) drafts[e.target.dataset.draft] = e.target.value; });
+document.addEventListener('click', e => {
+  const full = e.target.dataset?.full;
+  if (full) { const z = document.getElementById('zoom'); z.querySelector('img').src = full; z.style.display = 'flex'; }
+});
+refresh(true);
+setInterval(refresh, 4000);
+</script>
+</body>
+</html>

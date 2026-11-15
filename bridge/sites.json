@@ -1,0 +1,28 @@
+{
+  "profiles": {
+    "google": {
+      "port": 9301
+    },
+    "openai": {
+      "port": 9302
+    }
+  },
+  "sites": {
+    "gemini": {
+      "profile": "google",
+      "url": "https://gemini.google.com/app"
+    },
+    "flowmusic": {
+      "profile": "google",
+      "url": "https://www.flowmusic.app/"
+    },
+    "chatgpt": {
+      "profile": "openai",
+      "url": "https://chatgpt.com/"
+    },
+    "aistudio": {
+      "profile": "google",
+      "url": "https://aistudio.google.com/generate-speech"
+    }
+  }
+}
