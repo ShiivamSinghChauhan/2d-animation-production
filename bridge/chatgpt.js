@@ -4,7 +4,7 @@
 import { runImageJob, insertText, fetchInPage, LimitReached } from './image_job.js';
 import { clickText, sleep, log } from './browser.js';
 
-// Everything that depends on ChatGPT's page layout (checked 2026-11-14).
+// Everything that depends on ChatGPT's page layout (checked 2026-11-14; Stop check fixed 2026-11-20).
 const START = 'https://chatgpt.com/';
 const SEL = {
   textbox: '#prompt-textarea, div[role=textbox][contenteditable=true]',
@@ -70,7 +70,9 @@ const steps = {
         const imgs = last ? [...last.querySelectorAll('img')].filter(i => i.complete && i.naturalWidth >= 256) : [];
         const text = (document.querySelector('main') || document.body).innerText;
         return {
-          imgs: imgs.length, busy: !!document.querySelector(SEL.stop), creating: /creating image|getting started/i.test(text),
+          // the page keeps a hidden Stop button after the answer is done: only a visible one means busy (2026-11-20)
+          imgs: imgs.length, busy: [...document.querySelectorAll(SEL.stop)].some(e => e.getBoundingClientRect().width > 0),
+          creating: /creating image|getting started/i.test(text),
           sig: imgs.map(i => i.currentSrc + i.naturalWidth).join('|') + text.length, tail: text.trim().slice(-400),
         };
       }, SEL);

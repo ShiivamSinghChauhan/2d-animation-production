@@ -3,6 +3,7 @@
 //   node room/render_edit.js <ep>   ->  out/edit/<ep>/<ep>.mp4 (progress in out/edit/<ep>/render.json)
 const fs = require('fs'), path = require('path'), { spawn } = require('child_process');
 const puppeteer = require(path.join(__dirname, '..', 'bridge', 'node_modules', 'puppeteer-core'));
+const ROOM_PORT = (() => { try { return fs.readFileSync(path.join(__dirname, '..', 'out', 'room_port.txt'), 'utf8').trim(); } catch { return '8790'; } })();
 const ROOT = path.join(__dirname, '..'), ep = process.argv[2];
 const OUT = path.join(ROOT, 'out', 'edit', ep), STATUS = path.join(OUT, 'render.json');
 const CHROME = [process.env.CHROME, 'C:/Program Files/Google/Chrome/Application/chrome.exe', 'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe'].find(f => f && fs.existsSync(f));
@@ -18,7 +19,7 @@ const status = s => fs.writeFileSync(STATUS, JSON.stringify(s));
     const page = await browser.newPage();
     await page.setViewport({ width: 1920, height: 1080 });
     const errs = []; page.on('pageerror', e => errs.push(e.message));
-    await page.goto(`http://127.0.0.1:8790/edit?ep=${encodeURIComponent(ep)}&render=1`);
+    await page.goto(`http://127.0.0.1:${ROOM_PORT}/edit?ep=${encodeURIComponent(ep)}&render=1`);
     await page.waitForFunction('window.RENDER_READY === true', { timeout: 600000 });
     const { fps, dur } = await page.evaluate(() => ({ fps: RENDER_API.fps, dur: RENDER_API.dur }));
     const total = Math.ceil(dur * fps);

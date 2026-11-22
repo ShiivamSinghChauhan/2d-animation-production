@@ -6,7 +6,7 @@
 // Result (one JSON line): {"ok":true,"files":[...]} or {"ok":false,"error":"...","limit":true?,"files":[...]}
 import fs from 'node:fs';
 import path from 'node:path';
-import { connect, sitePage, catchDownloads, finish, sleep, log, CONFIG } from './browser.js';
+import { connect, sitePage, ownTab, takeTurn, catchDownloads, finish, sleep, log, CONFIG } from './browser.js';
 
 // Thrown when the site says the plan's quota is used up: the desk stops using the site until it resets.
 export class LimitReached extends Error {}
@@ -14,11 +14,13 @@ export class LimitReached extends Error {}
 export async function runImageJob(site, steps) {
   const job = JSON.parse(fs.readFileSync(process.argv[2], 'utf8').replace(/^﻿/, ''));
   const files = [];
-  let page = null;
+  let page = null, ok = false;
+  const release = await takeTurn(CONFIG.sites[site].profile, `${site}: ${path.basename(job.out_dir)}`);
   const browser = await connect(CONFIG.sites[site].profile);
   const downloads = await catchDownloads(browser, path.join(job.out_dir, '.downloads'));
   try {
-    page = await sitePage(browser, site);
+    // collect reads the chat that is already open; a new job works in a tab of its own
+    page = job.collect ? await sitePage(browser, site) : await ownTab(browser, site);
     for (let k = 0; k < (job.n || 1); k++) {
       if (!job.collect) {   // collect: only save what the open chat already shows (after a timeout)
         await steps.newChat(page, job);
@@ -40,11 +42,14 @@ export async function runImageJob(site, steps) {
       await sleep(3000);
     }
     await finish({ ok: true, files });
+    ok = true;
   } catch (e) {
     await finish({ ok: false, error: String(e.message || e), limit: e instanceof LimitReached || undefined, files }, page, job.out_dir);
   } finally {
     await downloads.release();
+    if (ok && page && !job.collect) await page.close().catch(() => {});   // a failed job's tab stays for `prod.py collect`
     await browser.disconnect();
+    release();
   }
 }
 

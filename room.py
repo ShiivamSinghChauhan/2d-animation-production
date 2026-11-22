@@ -26,7 +26,7 @@ import prod
 
 PORT = 8790   # 7790 fell inside a port range Windows reserves (netsh int ipv4 show excludedportrange protocol=tcp)
 ROOT = prod.ROOT
-SERVABLE = (ROOT / 'jobs', ROOT / 'assets', ROOT / 'episodes', ROOT / 'out' / 'edit')
+SERVABLE = (ROOT / 'jobs', ROOT / 'assets', ROOT / 'episodes', ROOT / 'out' / 'edit', ROOT / 'rigs')
 LOG = deque(maxlen=300)
 TASKS = queue.Queue()
 BUSY = {}                      # asset id -> 'waiting' | 'working'
@@ -190,6 +190,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({'dir': f'assets/puppets/{pid}/parts', 'parts': parts, 'layout': lay,
                                    'updates': [u for u in ups if not u.get('applied')],
                                    'reference': pinfo.get('reference')})
+        if path == '/char':                # character studio for fixed-skeleton characters (charkit.py)
+            return self.send_file(ROOT / 'room' / 'char.html')
+        if path == '/skel.js':
+            return self.send_file(ROOT / 'room' / 'skel.js')
+        if path == '/api/char':            # a character: its template's rig, its parts, the actions for its skeleton
+            cid = parse_qs(urlparse(self.path).query).get('id', [''])[0]
+            r = char_state(cid)
+            return self.send_json(r) if r else self.send_error(404)
+        if path == '/api/char/list':
+            return self.send_json(sorted(f.parent.name for f in (ROOT / 'assets' / 'chars').glob('*/char.json')))
         if path == '/edit':
             return self.send_file(ROOT / 'room' / 'edit.html')
         if path == '/engine.js':
@@ -243,6 +253,15 @@ class Handler(BaseHTTPRequestHandler):
             LOG.append(f"{time.strftime('%H:%M')} {ep}: added {f.name}")
             return self.send_json({'ok': True, 'file': f.relative_to(ROOT).as_posix()})
         data = json.loads(self.rfile.read(int(self.headers.get('Content-Length') or 0)) or b'{}')
+        if urlparse(self.path).path == '/api/char':            # the user's nudges to a character's parts
+            d = ROOT / 'assets' / 'chars' / str(data.get('id', ''))
+            if '..' in str(data.get('id', '')) or not (d / 'char.json').exists():
+                return self.send_error(404)
+            info = json.loads((d / 'char.json').read_text(encoding='utf-8'))
+            info['deltas'] = {k: {kk: float(vv) for kk, vv in v.items() if kk in ('x', 'y', 'r', 's')}
+                              for k, v in (data.get('deltas') or {}).items()}
+            (d / 'char.json').write_text(json.dumps(info, indent=1, ensure_ascii=False), encoding='utf-8')
+            return self.send_json({'ok': True})
         if urlparse(self.path).path == '/api/puppet/ask':      # a fix for Claude: marks + words on one part
             return self.send_json(ask_claude(data))
         if urlparse(self.path).path == '/api/puppet/applied':  # the editor has applied Claude's changes
@@ -352,6 +371,22 @@ class Handler(BaseHTTPRequestHandler):
         else:
             return self.send_error(404)
         self.send_json({'ok': True})
+
+
+def char_state(cid):
+    """A fixed-skeleton character for the studio and the editors: rig + parts + the actions for its skeleton."""
+    d = ROOT / 'assets' / 'chars' / cid
+    if not cid or '..' in cid or not (d / 'char.json').exists():
+        return None
+    info = json.loads((d / 'char.json').read_text(encoding='utf-8'))
+    if not info.get('parts'):
+        return None
+    rig = json.loads((ROOT / 'rigs' / info['template'] / 'rig.json').read_text(encoding='utf-8'))
+    actions = {}
+    for f in sorted((ROOT / 'rigs' / 'actions').glob('*.json')):
+        actions[f.stem] = json.loads(f.read_text(encoding='utf-8'))
+    mt = max((d / p['file']).stat().st_mtime for p in info['parts'] if (d / p['file']).exists())
+    return {'char': info, 'rig': rig, 'actions': actions, 'dir': f'assets/chars/{cid}', 'mtime': int(mt)}
 
 
 def edit_state(ep):
@@ -510,8 +545,21 @@ def rig_file(aid):
 
 def main():
     threading.Thread(target=worker, daemon=True).start()
-    server = ThreadingHTTPServer(('127.0.0.1', PORT), Handler)
-    url = f'http://127.0.0.1:{PORT}/'
+    # Windows (Hyper-V / WSL) reserves blocks of 100 ports that move when they start: if 8790 is taken, the next
+    # free one of these; the port in use is written to out/room_port.txt for the render scripts
+    server = None
+    for port in (PORT, 9790, 6790, 5790, 4790):
+        try:
+            server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
+            break
+        except OSError as e:
+            print(f'  port {port} not free ({e.strerror or e})')
+    if server is None:
+        sys.exit('no free port for the asset room')
+    port = server.server_address[1]
+    (ROOT / 'out').mkdir(exist_ok=True)
+    (ROOT / 'out' / 'room_port.txt').write_text(str(port), encoding='utf-8')
+    url = f'http://127.0.0.1:{port}/'
     print(f'asset room: {url}  (Ctrl+C to stop)')
     if '--no-open' not in sys.argv:
         webbrowser.open(url)

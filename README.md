@@ -15,6 +15,12 @@ instead of paid APIs.
   Gemini and AI Studio TTS through *your own signed-in Chrome windows*. Selectors live in each driver's `SEL` block.
 - **Production desk** (`prod.py`, `room.py`, `cut.py`, `fixdesk.py`, ): recipes -> jobs -> tries ->
   pick; the asset room is the page where you pick, redo and leave notes.
+- **Fixed-skeleton characters** (`charkit.py`, `room/skel.js`, `room/char.html`): a template (skeleton + grey
+  mannequin + part masks, drawn in code) is painted by ChatGPT as a character in one edit, then cut into parts, so
+  every character shares the skeleton and every action in `rigs/actions/` plays on all of them. Limbs bend as one
+  smooth mesh each, the torso and skirt as soft meshes, the braid hangs on bones of its own, the neck bends with the
+  head. Extra ChatGPT edits paint what the near arm hides (`reveal`) and a sheet of hands (open palm, fist, pointing)
+  that actions swap in. Studio: `/char?id=<id>` (actions, bones, pose handles for hands, feet, hips and head).
 
 ## Setup
 
@@ -29,6 +35,17 @@ python room.py                 # http://127.0.0.1:8790  (asset room, /puppet?id=
 python prod.py login           # opens Chrome windows: sign in by hand, once
 ```
 Episodes live in `episodes/<ep>/` (lines.yaml, shots.yaml, cues.yaml, sound.yaml); this repo ships none.
+
+A fixed-skeleton character (this repo ships the template code and the actions, no characters):
+```
+python charkit.py template girl_frock_3q                       # -> rigs/girl_frock_3q/ (mannequin, masks, hand sheet)
+python charkit.py dress <id> girl_frock_3q <design.png> "<look>"  # ChatGPT paints the mannequin as the character
+python charkit.py reveal <id>                                  # ChatGPT paints what the near arm hides
+python charkit.py hands <id>                                   # ChatGPT paints the template's hand sheet
+python charkit.py cut <id>                                     # -> assets/chars/<id>/ (char.json + parts/)
+python charkit.py check <id>                                   # close-ups of the risky poses: out/chars/<id>/check.jpg
+node room/render_char.js <id> demo|bend|poses                  # test video (reads files from disk, no server needed)
+```
 
 ## Notes
 

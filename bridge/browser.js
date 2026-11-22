@@ -50,6 +50,36 @@ export async function sitePage(browser, site, { fresh = false } = {}) {
   return page;
 }
 
+// One job at a time per window. A driver waits while another of our drivers holds the window
+// (out/bridge/turn_<profile>.json, freed when that process ends), so two jobs never fight over a page.
+// Returns release(). Automations that are not ours don't take turns: work in a tab of your own (ownTab).
+const TURNS = path.join(ROOT, 'out', 'bridge');
+const alivePid = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
+export async function takeTurn(profile, what, maxWaitMs = 3600000) {
+  fs.mkdirSync(TURNS, { recursive: true });
+  const f = path.join(TURNS, `turn_${profile}.json`);
+  const read = () => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
+  for (const t0 = Date.now(); ; await sleep(5000)) {
+    let cur = read();
+    if (!cur || !alivePid(cur.pid) || Date.now() - cur.since > 45 * 60000) {
+      fs.writeFileSync(f, JSON.stringify({ pid: process.pid, since: Date.now(), what }));
+      await sleep(300);
+      cur = read();
+      if (cur && cur.pid === process.pid)
+        return () => { const c = read(); if (c && c.pid === process.pid) fs.rmSync(f, { force: true }); };
+    }
+    if (Date.now() - t0 > maxWaitMs) throw new Error(`waited an hour for the ${profile} window (${cur && cur.what})`);
+    log(`${profile}: waiting for "${cur && cur.what}" to finish`);
+  }
+}
+
+// A new tab on the site for this job, so a tab someone else is using is never taken over.
+export async function ownTab(browser, site) {
+  const page = await browser.newPage();
+  await page.goto(CONFIG.sites[site].url, { waitUntil: 'domcontentloaded' });
+  return page;
+}
+
 // Send the browser's downloads to dir while a job runs.
 //   next(timeout) waits for the next finished download -> { file, name }
 //   release() gives downloads back to the normal Downloads folder

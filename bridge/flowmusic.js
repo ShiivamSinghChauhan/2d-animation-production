@@ -6,7 +6,7 @@
 // collect: only download the songs the open session already shows.
 import fs from 'node:fs';
 import path from 'node:path';
-import { connect, sitePage, catchDownloads, clickText, finish, sleep, log } from './browser.js';
+import { connect, sitePage, ownTab, takeTurn, catchDownloads, clickText, finish, sleep, log } from './browser.js';
 import { LimitReached } from './image_job.js';
 
 // Everything that depends on Flow Music's page layout (checked 2026-11-14).
@@ -86,11 +86,12 @@ async function downloadSong(page, downloads, i, format) {
 const job = JSON.parse(fs.readFileSync(process.argv[2], 'utf8').replace(/^﻿/, ''));
 const format = (job.audio_format || 'wav').toUpperCase();
 const files = [];
-let page = null;
+let page = null, ok = false;
+const release = await takeTurn('google', `flowmusic: ${path.basename(job.out_dir)}`);
 const browser = await connect('google');
 const downloads = await catchDownloads(browser, path.join(job.out_dir, '.downloads'));
 try {
-  page = await sitePage(browser, 'flowmusic');
+  page = job.collect ? await sitePage(browser, 'flowmusic') : await ownTab(browser, 'flowmusic');
   for (let k = 0; k < (job.n || 1); k++) {
     let before = 0;
     if (!job.collect) {
@@ -118,9 +119,12 @@ try {
     }
   }
   await finish({ ok: true, files });
+  ok = true;
 } catch (e) {
   await finish({ ok: false, error: String(e.message || e), limit: e instanceof LimitReached || undefined, files }, page, job.out_dir);
 } finally {
   await downloads.release();
+  if (ok && page && !job.collect) await page.close().catch(() => {});
   await browser.disconnect();
+  release();
 }
