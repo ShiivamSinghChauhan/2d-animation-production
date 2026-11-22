@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { connect, sitePage, finish, sleep, log, clickText } from './browser.js';
+import { connect, sitePage, ownTab, takeTurn, finish, sleep, log, clickText } from './browser.js';
 import { insertText } from './image_job.js';
 
 const SEL = {
@@ -23,10 +23,11 @@ const SEL = {
 
 const startedAt = Date.now();
 const req = JSON.parse(fs.readFileSync(process.argv[2], 'utf8').replace(/^\uFEFF/, ''));
+const release = await takeTurn('google', `aistudio: ${path.basename(req.out)}`);
 const browser = await connect('google');
-let page = null;
+let page = null, ok = false;
 try {
-  page = await sitePage(browser, 'aistudio', { fresh: !req.collect });
+  page = req.collect ? await sitePage(browser, 'aistudio') : await ownTab(browser, 'aistudio');
   if (!req.collect) {
   await sleep(5000);
   await clickText(page, 'button,[role=button]', SEL.newDialog); await sleep(2000);
@@ -83,8 +84,11 @@ try {
   fs.copyFileSync(file, req.out); fs.unlinkSync(file);
   log(`aistudio: saved ${req.out}`);
   await finish({ ok: true, file: req.out, seconds: Math.round((Date.now() - t0) / 1000) });
+  ok = true;
 } catch (e) {
   await finish({ ok: false, error: String(e.message || e), limit: e.limit || undefined }, page, path.dirname(req.out));
 } finally {
+  if (ok && page && !req.collect) await page.close().catch(() => {});
   await browser.disconnect();
+  release();
 }

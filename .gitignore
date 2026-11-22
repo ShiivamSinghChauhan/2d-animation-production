@@ -8,3 +8,6 @@ assets/
 episodes/
 __pycache__/
 bible/
+# templates are built by `charkit.py template`; only the shared actions are kept
+rigs/*
+!rigs/actions/

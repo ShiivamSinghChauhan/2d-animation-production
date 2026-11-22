@@ -2,3 +2,4 @@ numpy
 Pillow
 scipy
 PyYAML
+opencv-python
